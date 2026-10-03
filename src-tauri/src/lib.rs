@@ -1,6 +1,7 @@
 pub mod classify;
 pub mod cleanup;
 pub mod commands;
+pub mod crashlog;
 pub mod dashboard;
 pub mod db;
 pub mod folders;
@@ -22,22 +23,39 @@ mod smoke_tests;
 #[cfg(test)]
 mod watcher_tests;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::Manager;
 
+/// Where Atlas keeps its data: `ATLAS_DATA_DIR` (an isolated profile, e.g. for
+/// QA next to a normal instance) or the per-user local app data folder for
+/// this app's identifier (the same folder Tauri's `app_local_data_dir` uses).
+fn data_dir_for(identifier: &str) -> PathBuf {
+    match std::env::var_os("ATLAS_DATA_DIR") {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join(identifier),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let data_dir = data_dir_for(&context.config().identifier);
+    // Crash logging starts before anything else so even startup panics land
+    // on disk; a leftover session marker means the last run crashed natively.
+    let log = Arc::new(crashlog::CrashLog::new(
+        data_dir.join("logs"),
+        crashlog::DEFAULT_MAX_BYTES,
+        crashlog::DEFAULT_KEEP,
+    ));
+    crashlog::install(log.clone());
+    log.begin_session();
+
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .setup(|app| {
-            // ATLAS_DATA_DIR runs an isolated profile (own index, settings and
-            // holding area), e.g. for QA next to a normal instance.
-            let data_dir = match std::env::var_os("ATLAS_DATA_DIR") {
-                Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
-                _ => app.path().app_local_data_dir()?,
-            };
+        .setup(move |app| {
             let st: state::Shared = Arc::new(state::AppState::new(data_dir)?);
             app.manage(st.clone());
 
@@ -65,6 +83,8 @@ pub fn run() {
             commands::default_settings,
             commands::save_settings,
             commands::save_appearance,
+            commands::log_client_error,
+            commands::open_logs_folder,
             commands::app_status,
             commands::start_scan,
             commands::cancel_scan,
@@ -106,6 +126,11 @@ pub fn run() {
             commands::holding_purge_expired,
             commands::cleanup_log,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Atlas");
+        .build(context)
+        .expect("error while building Atlas");
+    app.run(move |_, event| {
+        if let tauri::RunEvent::Exit = event {
+            log.end_session();
+        }
+    });
 }

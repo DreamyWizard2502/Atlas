@@ -100,6 +100,44 @@ pub async fn save_appearance(
     .await
 }
 
+/// Record a frontend error (error boundary or uncaught error) in the crash log.
+#[tauri::command]
+pub async fn log_client_error(
+    source: String,
+    message: String,
+    stack: Option<String>,
+    component_stack: Option<String>,
+) -> CmdResult<()> {
+    let mut body = message;
+    if let Some(s) = stack.filter(|s| !s.trim().is_empty()) {
+        body.push_str("\n\nstack:\n");
+        body.push_str(s.trim());
+    }
+    if let Some(c) = component_stack.filter(|s| !s.trim().is_empty()) {
+        body.push_str("\n\ncomponent stack:\n");
+        body.push_str(c.trim());
+    }
+    // Clamp what a misbehaving page can write per call.
+    body.truncate(body.char_indices().nth(64 * 1024).map(|(i, _)| i).unwrap_or(body.len()));
+    let source: String = source.chars().filter(|c| c.is_alphanumeric() || "-_.:".contains(*c)).take(60).collect();
+    blocking(move || {
+        crate::crashlog::write_event("ERROR", &format!("frontend:{source}"), &body);
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn open_logs_folder(st: State<'_, Shared>) -> CmdResult<String> {
+    let dir = st.logs_dir();
+    blocking(move || {
+        std::fs::create_dir_all(&dir)?;
+        tauri_plugin_opener::open_path(&dir, None::<&str>)?;
+        Ok(dir.to_string_lossy().to_string())
+    })
+    .await
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppStatus {
@@ -110,6 +148,7 @@ pub struct AppStatus {
     last_scan_at: Option<i64>,
     data_dir: String,
     holding_dir: String,
+    logs_dir: String,
     home: Option<String>,
 }
 
@@ -129,6 +168,7 @@ pub async fn app_status(st: State<'_, Shared>) -> CmdResult<AppStatus> {
             last_scan_at: kv_get(&conn, "last_scan_at")?.and_then(|v| v.parse().ok()),
             data_dir: st.data_dir.to_string_lossy().to_string(),
             holding_dir: st.holding.primary.to_string_lossy().to_string(),
+            logs_dir: st.logs_dir().to_string_lossy().to_string(),
             home: crate::platform::home_dir().map(|h| h.to_string_lossy().to_string()),
         })
     })

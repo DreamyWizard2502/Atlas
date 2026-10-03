@@ -51,6 +51,11 @@ impl AppState {
         })
     }
 
+    /// Crash and error logs (see `crashlog`).
+    pub fn logs_dir(&self) -> PathBuf {
+        crate::crashlog::global().map(|l| l.dir().to_path_buf()).unwrap_or_else(|| self.data_dir.join("logs"))
+    }
+
     pub fn settings(&self) -> Result<Settings> {
         Settings::load(&self.db.conn()?)
     }

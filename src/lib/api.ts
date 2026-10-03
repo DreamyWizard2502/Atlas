@@ -232,6 +232,7 @@ export interface AppStatus {
   lastScanAt: number | null;
   dataDir: string;
   holdingDir: string;
+  logsDir: string;
   home: string | null;
 }
 
@@ -267,6 +268,9 @@ export const api = {
   saveAppearance: (mode: Settings["themeMode"], lightPalette: string, darkPalette: string) =>
     invoke<Settings>("save_appearance", { mode, lightPalette, darkPalette }),
   appStatus: () => invoke<AppStatus>("app_status"),
+  logClientError: (e: { source: string; message: string; stack: string | null; componentStack: string | null }) =>
+    invoke<void>("log_client_error", e),
+  openLogsFolder: () => invoke<string>("open_logs_folder"),
   startScan: () => invoke<void>("start_scan"),
   cancelScan: () => invoke<void>("cancel_scan"),
 

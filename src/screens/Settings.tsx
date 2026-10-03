@@ -225,6 +225,22 @@ export function SettingsScreen() {
             </Button>
           </Card>
 
+          <Card
+            title="Crash and error log"
+            subtitle="Panics, view errors and unexpected shutdowns are written here, even without a terminal. Include it when reporting a problem."
+            action={
+              <Button
+                size="sm"
+                onClick={() => api.openLogsFolder().catch((e) => toast(`Couldn't open the logs folder: ${errorMessage(e)}`, { tone: "attention" }))}
+              >
+                <FolderOpen size={13} /> Open logs folder
+              </Button>
+            }
+          >
+            <p className="selectable break-all text-xs text-ink-2">{status?.logsDir}</p>
+            <p className="mt-1 text-xs text-ink-3">atlas.log rolls over at 1 MB; the last three older files are kept.</p>
+          </Card>
+
           <Card title="Storage locations">
             <dl className="space-y-2 text-xs">
               <div>

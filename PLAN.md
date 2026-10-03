@@ -17,6 +17,7 @@ drive) rather than by path. The folder tree is still there, as a secondary view.
 ┌──────────────┴───────────────────────── Rust (src-tauri) ─────────────┴─────────────────┐
 │ commands.rs    thin #[tauri::command] layer; heavy work runs in spawn_blocking          │
 │ classify.rs    content sniffing for ambiguous extensions (.obj), storage categories    │
+│ crashlog.rs    persistent crash/error log: panic hook, frontend errors, unclean exits  │
 │ noise.rs       activity exclusions (Jump Back In / Timeline / inbox), SQL function    │
 │ platform/      OS abstraction (known folders, disk space, attributes, lock check,       │
 │                installed apps, system roots). windows.rs now; other OSes later.         │

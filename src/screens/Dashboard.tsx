@@ -31,29 +31,29 @@ export function Dashboard() {
     <div className="h-full overflow-auto">
       <div className="mx-auto flex max-w-[1480px] flex-col gap-4 px-6 pb-8 pt-5">
         <SearchBar />
-        <Safe>
+        <Safe name="metrics">
           <MetricCards />
         </Safe>
-        <Safe>
+        <Safe name="jump-back-in">
           <JumpBackIn />
         </Safe>
         <div className="grid grid-cols-12 gap-4">
-          <Safe span="xl:col-span-8">
+          <Safe name="storage" span="xl:col-span-8">
             <StorageCard />
           </Safe>
-          <Safe span="xl:col-span-4">
+          <Safe name="growth" span="xl:col-span-4">
             <GrowthCard />
           </Safe>
         </div>
         <div className="grid grid-cols-12 gap-4">
-          <Safe span="xl:col-span-7">
+          <Safe name="inbox" span="xl:col-span-7">
             <InboxCard />
           </Safe>
-          <Safe span="xl:col-span-5">
+          <Safe name="cleanup" span="xl:col-span-5">
             <CleanupCard />
           </Safe>
         </div>
-        <Safe>
+        <Safe name="pinned-spaces">
           <PinnedSpaces />
         </Safe>
       </div>
@@ -62,9 +62,10 @@ export function Dashboard() {
 }
 
 /** One failing widget shows its own small error instead of blanking the dashboard. */
-function Safe({ children, span }: { children: React.ReactNode; span?: string }) {
+function Safe({ children, span, name }: { children: React.ReactNode; span?: string; name: string }) {
   return (
     <ErrorBoundary
+      name={`dashboard:${name}`}
       fallback={(e, retry) => (
         <div className={`card col-span-12 flex items-center gap-3 px-4 py-3 text-xs text-ink-2 ${span ?? ""}`}>
           <span className="flex-1">This card couldn't load ({e.message}).</span>

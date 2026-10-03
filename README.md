@@ -210,9 +210,29 @@ Outputs:
 The first build downloads the NSIS and WiX tooling, so it needs network access.
 The installers are not code-signed, so Windows SmartScreen will warn on install.
 
+## Crash and error log
+
+Atlas keeps a persistent log, so diagnosing a crash never depends on a terminal
+being open. **Settings › Crash and error log › Open logs folder** opens it.
+
+- **Rust panics:** message, location, thread and backtrace. Release builds
+  include line tables (`[profile.release] debug = "line-tables-only"`), so
+  backtraces name functions and lines on the machine that built them.
+- **Frontend errors:** errors caught by any error boundary (with the component
+  stack), plus uncaught JS errors and unhandled promise rejections. These are
+  de-duplicated and capped at 50 per session.
+- **Unclean exits:** native crashes such as a stack overflow never reach the
+  panic hook, so each launch leaves a session marker. If the previous session
+  didn't close cleanly, the next launch records that. Windows keeps the native
+  details in Event Viewer › Windows Logs › Application.
+
+The log is `logs\atlas.log` in Atlas's data folder. It rolls over at 1 MB and
+keeps three older files (`atlas.1.log` … `atlas.3.log`).
+
 ## Where data lives
 
-- Index, settings, spaces, tags, snapshots, logs: `%LOCALAPPDATA%\app.atlas.files\atlas.db`
+- Index, settings, spaces, tags, snapshots: `%LOCALAPPDATA%\app.atlas.files\atlas.db`
+- Crash and error log: `%LOCALAPPDATA%\app.atlas.files\logs\atlas.log`
 - Holding area: `%LOCALAPPDATA%\app.atlas.files\holding` (system drive),
   `X:\.atlas-holding` (other drives)
 

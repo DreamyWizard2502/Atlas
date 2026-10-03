@@ -1,8 +1,12 @@
 // Contain render errors: one broken widget or preview must never blank the
-// whole window. Each boundary shows its own fallback and can reset.
+// whole window. Each boundary shows its own fallback and can reset, and every
+// caught error goes to the persistent crash log.
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { reportError } from "../lib/errors";
 
 interface Props {
+  /** Where this boundary sits, recorded in the crash log. */
+  name: string;
   fallback: (error: Error, reset: () => void) => ReactNode;
   /** Changing this clears the error (e.g. a different file or screen). */
   resetKey?: unknown;
@@ -18,6 +22,7 @@ export class ErrorBoundary extends Component<Props, { error: Error | null }> {
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error("Atlas view error:", error, info.componentStack);
+    reportError(`boundary:${this.props.name}`, error, info.componentStack);
   }
 
   componentDidUpdate(prev: Props) {

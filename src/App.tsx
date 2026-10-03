@@ -113,6 +113,7 @@ export default function App() {
         <ScanBanner />
         <div className="min-h-0 flex-1">
           <ErrorBoundary
+            name={`screen:${screen}`}
             resetKey={screen}
             fallback={(e, retry) => (
               <Empty
@@ -131,13 +132,13 @@ export default function App() {
           </ErrorBoundary>
         </div>
       </main>
-      <ErrorBoundary fallback={() => null}>
+      <ErrorBoundary name="command-palette" fallback={() => null}>
         <CommandPalette />
       </ErrorBoundary>
-      <ErrorBoundary fallback={() => null}>
+      <ErrorBoundary name="quick-look" fallback={() => null}>
         <QuickLook />
       </ErrorBoundary>
-      <ErrorBoundary fallback={() => null}>
+      <ErrorBoundary name="menus-and-dialogs" fallback={() => null}>
         <ContextMenu />
         <Dialogs />
       </ErrorBoundary>

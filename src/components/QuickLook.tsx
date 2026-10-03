@@ -90,11 +90,11 @@ function QuickLookInner({ file }: { file: FileRef }) {
         </header>
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 items-center justify-center bg-surface-2">
-            <ErrorBoundary resetKey={file.path} fallback={() => <MetaFallback file={file} note="Atlas couldn't show a preview of this file." />}>
+            <ErrorBoundary name="quick-look:preview" resetKey={file.path} fallback={() => <MetaFallback file={file} note="Atlas couldn't show a preview of this file." />}>
               <Preview key={file.path} file={file} />
             </ErrorBoundary>
           </div>
-          <ErrorBoundary resetKey={file.path} fallback={() => <aside className="w-[260px] shrink-0 border-l border-line p-4 text-xs text-ink-3">Details unavailable.</aside>}>
+          <ErrorBoundary name="quick-look:details" resetKey={file.path} fallback={() => <aside className="w-[260px] shrink-0 border-l border-line p-4 text-xs text-ink-3">Details unavailable.</aside>}>
             <Details key={`d-${file.path}`} file={file} />
           </ErrorBoundary>
         </div>
