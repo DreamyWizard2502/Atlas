@@ -1,0 +1,36 @@
+[package]
+name = "atlas"
+version = "0.1.0"
+description = "Atlas — a dashboard-first file manager"
+edition = "2021"
+
+[lib]
+name = "atlas_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1.0.104"
+blake3 = "1.8.7"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+dirs = "7.0.0"
+jwalk = "0.9.0"
+notify = "8.2.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tauri = { version = "2.12.1", features = ["protocol-asset"] }
+tauri-plugin-clipboard-manager = "2.4.1"
+tauri-plugin-dialog = "2.8.1"
+tauri-plugin-opener = "2.7.0"
+tokio = { version = "1.53.1", features = ["time", "rt"] }
+trash = "5.2.9"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+winreg = "0.56.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
