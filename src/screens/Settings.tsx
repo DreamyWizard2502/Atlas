@@ -123,6 +123,27 @@ export function SettingsScreen() {
             </form>
           </Card>
 
+          <Card
+            title="Hidden from activity"
+            subtitle="Kept out of Jump Back In, the Timeline and the inbox. These files stay indexed and searchable."
+            action={
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  api.defaultSettings().then((d) => {
+                    set("activityExclusions", d.activityExclusions);
+                    toast("Default list restored. Save to apply.");
+                  })
+                }
+              >
+                <RotateCcw size={13} /> Reset to defaults
+              </Button>
+            }
+          >
+            <ActivityExclusions value={s.activityExclusions} onChange={(v) => set("activityExclusions", v)} />
+          </Card>
+
           <Card title="Thresholds">
             <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
               <NumberField label="Inbox age" suffix="days" hint="Downloads and Desktop items older than this appear in the inbox." value={s.inboxDays} onChange={(v) => set("inboxDays", v)} />
@@ -219,6 +240,44 @@ export function SettingsScreen() {
           </Card>
         </div>
       </div>
+    </div>
+  );
+}
+
+function parseLines(t: string): string[] {
+  return t
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+function ActivityExclusions({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
+  const [text, setText] = useState(value.join("\n"));
+  // Follow outside changes (reset, discard) without fighting the cursor while typing.
+  useEffect(() => {
+    if (parseLines(text).join("\n") !== value.join("\n")) setText(value.join("\n"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return (
+    <div>
+      <textarea
+        value={text}
+        spellCheck={false}
+        rows={10}
+        onChange={(e) => {
+          setText(e.target.value);
+          onChange(parseLines(e.target.value));
+        }}
+        className="w-full resize-y rounded-lg border border-line bg-surface px-2.5 py-2 font-mono text-xs leading-relaxed text-ink focus:border-accent focus:outline-none"
+      />
+      <ul className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 text-xs text-ink-3 sm:grid-cols-2">
+        <li><code className="text-ink-2">target</code> a folder name, anywhere</li>
+        <li><code className="text-ink-2">~\.claude</code> a path; ~ and %TEMP% work</li>
+        <li><code className="text-ink-2">*.pdb</code> a file name pattern</li>
+        <li><code className="text-ink-2">{"{id}"}.json</code> files named by a UUID, hash or number</li>
+        <li><code className="text-ink-2">kind:object</code> compiled object files, detected by content</li>
+        <li>One entry per line; lines starting with # are ignored</li>
+      </ul>
     </div>
   );
 }

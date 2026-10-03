@@ -2,7 +2,6 @@
 //! accurate) and annotates folder sizes from the index when known.
 
 use crate::db::{ext_of, to_unix};
-use crate::model::kind_of;
 use crate::platform;
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
@@ -81,7 +80,7 @@ pub fn list_dir(conn: &Connection, path: &str) -> Result<Vec<DirEntry>> {
         let ext = if is_dir { String::new() } else { ext_of(&name) };
         out.push(DirEntry {
             size: if is_dir { indexed.get(&ps).copied() } else { Some(meta.len() as i64) },
-            kind: if is_dir { "folder" } else { kind_of(&ext) },
+            kind: if is_dir { "folder" } else { crate::classify::kind_for(&p, &ext) },
             ext,
             path: ps,
             name,

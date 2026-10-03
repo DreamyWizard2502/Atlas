@@ -1,7 +1,7 @@
 // Run with `npm test` (Node's built-in test runner; Node 22.6+ runs TypeScript directly).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AA_TEXT, CONTRAST_PAIRS, contrast, hueSat, isHex } from "./contrast.ts";
+import { AA_TEXT, CATEGORY_TOKENS, CONTRAST_PAIRS, contrast, deltaE, hueSat, isHex } from "./contrast.ts";
 import { DEFAULT_DARK, DEFAULT_LIGHT, PALETTES } from "./palettes.ts";
 import type { Palette, Tokens } from "./palettes.ts";
 
@@ -31,7 +31,7 @@ for (const p of PALETTES) {
   });
 }
 
-const BACKGROUNDS: (keyof Tokens)[] = ["bg", "surface", "surface2", "accentSoft", "amberSoft", "greenSoft", "accentTile", "fileTile", "coldTile"];
+const BACKGROUNDS: (keyof Tokens)[] = ["bg", "surface", "surface2", "accentSoft", "amberSoft", "greenSoft", ...CATEGORY_TOKENS];
 const TEXTS: (keyof Tokens)[] = ["text", "text2", "text3", "accent", "amber", "green", "danger", "cold", "onAccent", "onSuccess"];
 
 test("dark palettes: no pure black backgrounds, no pure white text", () => {
@@ -74,6 +74,29 @@ test("semantic colors keep their meaning in every palette", () => {
     }
   };
   PALETTES.forEach(check);
+});
+
+test("treemap categories: distinct, and never mistaken for meaning colors", () => {
+  for (const p of PALETTES) {
+    const t = p.tokens;
+    const chromatic = CATEGORY_TOKENS.filter((k) => k !== "catTemp" && k !== "catOther");
+    for (const k of chromatic) {
+      const c = hueSat(t[k]);
+      for (const sem of ["amber", "green", "danger"] as const) {
+        const d = hueDistance(c.hue, hueSat(t[sem]).hue);
+        assert.ok(d >= 15, `${p.id}: ${k} hue too close to ${sem} (${d.toFixed(0)}°)`);
+      }
+    }
+    for (const k of ["catTemp", "catOther"] as const) assert.ok(hueSat(t[k]).sat <= 0.15, `${p.id}: ${k} must stay gray`);
+    // Labels, legend and tooltips carry identity too, so 6 is the floor (8 is ideal).
+    for (let i = 0; i < CATEGORY_TOKENS.length; i++) {
+      for (let j = i + 1; j < CATEGORY_TOKENS.length; j++) {
+        const [a, b] = [CATEGORY_TOKENS[i], CATEGORY_TOKENS[j]];
+        const d = deltaE(t[a], t[b]);
+        assert.ok(d >= 6, `${p.id}: ${a} and ${b} are too similar (dE ${d.toFixed(1)})`);
+      }
+    }
+  }
 });
 
 test("AA threshold is the standard 4.5:1 for text", () => {

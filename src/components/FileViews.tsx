@@ -192,7 +192,7 @@ export function FileCard({ f, list, selected, meta }: { f: FileLike; list: FileR
       }`}
     >
       <div className="h-[104px] shrink-0 overflow-hidden border-b border-line bg-surface-2">
-        <Thumb path={f.path} ext={f.ext} kind={f.kind} />
+        <Thumb path={f.path} ext={f.ext} kind={f.kind} size={f.size} />
       </div>
       <div className="flex min-h-0 flex-1 flex-col justify-center gap-0.5 px-3">
         <span className="truncate text-[13px] font-medium" title={f.name}>

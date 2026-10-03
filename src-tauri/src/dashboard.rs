@@ -3,7 +3,10 @@
 use crate::cleanup::analyze::likely_installed;
 use crate::cleanup::CleanupSummary;
 use crate::db::{kv_get, now};
-use crate::model::{kind_of, FileItem, FILE_COLS};
+use crate::classify;
+use crate::noise::NoiseFilter;
+use std::sync::Arc;
+use crate::model::{stored_kind, FileItem, FILE_COLS, FILE_COLS_LEN};
 use crate::platform::{self, DiskSpace};
 use crate::settings::Settings;
 use anyhow::Result;
@@ -29,6 +32,8 @@ pub struct Metrics {
     pub inbox_count: i64,
     pub inbox_bytes: i64,
     pub reclaimable: Option<i64>,
+    /// Large and cold files: worth a look, not counted as reclaimable.
+    pub review_bytes: Option<i64>,
     pub reclaimable_at: Option<i64>,
 }
 
@@ -60,9 +65,10 @@ pub fn metrics(conn: &Connection, settings: &Settings) -> Result<Metrics> {
         (Some((d0, _)), Some(_)) => (Some(0), Some(d0)),
         _ => (None, None),
     };
-    let inbox = inbox(conn, settings, 0)?;
-    let summary: Option<CleanupSummary> =
-        kv_get(conn, "cleanup_summary")?.and_then(|s| serde_json::from_str(&s).ok());
+    let inbox = inbox(conn, settings, 0, &NoiseFilter::new(&settings.activity_exclusions).with_roots(&settings.roots))?;
+    let summary: Option<CleanupSummary> = kv_get(conn, "cleanup_summary")?
+        .and_then(|s| serde_json::from_str::<CleanupSummary>(&s).ok())
+        .filter(|s| s.is_current());
     Ok(Metrics {
         drive,
         indexed_bytes,
@@ -72,6 +78,7 @@ pub fn metrics(conn: &Connection, settings: &Settings) -> Result<Metrics> {
         inbox_count: inbox.total,
         inbox_bytes: inbox.total_size,
         reclaimable: summary.as_ref().map(|s| s.total_reclaimable),
+        review_bytes: summary.as_ref().map(|s| s.review_total),
         reclaimable_at: summary.map(|s| s.analyzed_at),
     })
 }
@@ -95,14 +102,15 @@ pub struct Session {
     pub files: Vec<RecentFile>,
 }
 
-const NOISE_EXTS: &str = "'tmp','lnk','ini','log','db','db-journal','db-wal','db-shm','lock','lck','crdownload','part','etl','dat'";
-
-pub fn jump_back_in(conn: &Connection, limit: usize, gap_min: u32) -> Result<Vec<Session>> {
+/// Recently touched files, minus activity exclusions (build output, app data,
+/// machine-generated files; see `noise`).
+pub fn jump_back_in(conn: &Connection, limit: usize, gap_min: u32, noise: &Arc<NoiseFilter>) -> Result<Vec<Session>> {
+    crate::noise::register(conn, noise.clone())?;
     let mut by_path: HashMap<String, RecentFile> = HashMap::new();
     let mut stmt = conn.prepare(&format!(
         "SELECT {FILE_COLS} FROM files f
          WHERE f.is_dir = 0 AND f.modified IS NOT NULL AND f.modified <= ?1 + 86400
-           AND f.ext NOT IN ({NOISE_EXTS}) AND f.name NOT LIKE '~$%' AND f.name NOT LIKE '.%'
+           AND f.name NOT LIKE '.%' AND NOT atlas_noise(f.path, f.name, f.kind)
          ORDER BY f.modified DESC LIMIT 200"
     ))?;
     for item in stmt.query_map([now()], FileItem::from_row)? {
@@ -112,9 +120,9 @@ pub fn jump_back_in(conn: &Connection, limit: usize, gap_min: u32) -> Result<Vec
     }
     let mut stmt = conn.prepare(&format!(
         "SELECT {FILE_COLS}, a.opened_at FROM activity a JOIN files f ON f.path = a.path
-         WHERE f.is_dir = 0 ORDER BY a.opened_at DESC LIMIT 100"
+         WHERE f.is_dir = 0 AND NOT atlas_noise(f.path, f.name, f.kind) ORDER BY a.opened_at DESC LIMIT 100"
     ))?;
-    let rows = stmt.query_map([], |r| Ok((FileItem::from_row(r)?, r.get::<_, i64>(10)?)))?;
+    let rows = stmt.query_map([], |r| Ok((FileItem::from_row(r)?, r.get::<_, i64>(FILE_COLS_LEN)?)))?;
     for row in rows {
         let (item, opened_at) = row?;
         let e = by_path
@@ -158,6 +166,12 @@ pub struct TreeNode {
     pub kind: &'static str,
     pub file_count: i64,
     pub other: bool,
+    /// Dominant storage category by bytes (see `classify::CATEGORIES`).
+    pub category: &'static str,
+    /// Share of the tile's bytes in that category (0-1).
+    pub category_share: f64,
+    /// Entries this node stands for (1, or N for the "more items" remainder).
+    pub entries: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,6 +184,42 @@ pub struct Treemap {
     pub children: Vec<TreeNode>,
 }
 
+/// Columns for a treemap node: path, name, size, is_dir, ext, file_count, kind, cat, cb0..cb7.
+const NODE_COLS: &str = "path, name, size, is_dir, ext, file_count, kind, cat, cb0, cb1, cb2, cb3, cb4, cb5, cb6, cb7";
+
+fn node_from_row(r: &rusqlite::Row, name_from_path: bool) -> rusqlite::Result<TreeNode> {
+    let is_dir: bool = r.get(3)?;
+    let ext: String = r.get(4)?;
+    let size: i64 = r.get(2)?;
+    let stored: Option<String> = r.get(6)?;
+    let (category, share) = if is_dir {
+        let mut best = (classify::OTHER as usize, 0i64);
+        let mut total = 0i64;
+        for i in 0..8 {
+            let v: i64 = r.get(8 + i)?;
+            total += v.max(0);
+            if v > best.1 {
+                best = (i, v);
+            }
+        }
+        (best.0, if total > 0 { best.1 as f64 / total as f64 } else { 0.0 })
+    } else {
+        (r.get::<_, i64>(7)?.clamp(0, 7) as usize, 1.0)
+    };
+    Ok(TreeNode {
+        name: if name_from_path { r.get(0)? } else { r.get(1)? },
+        path: r.get(0)?,
+        size,
+        is_dir,
+        kind: if is_dir { "folder" } else { stored_kind(stored.as_deref(), &ext) },
+        file_count: if is_dir { r.get(5)? } else { 1 },
+        other: false,
+        category: classify::CATEGORIES[category].0,
+        category_share: share,
+        entries: 1,
+    })
+}
+
 pub fn treemap(conn: &Connection, path: Option<String>, max_children: usize) -> Result<Treemap> {
     let roots: Vec<String> = {
         let mut stmt = conn.prepare("SELECT path FROM files WHERE path = root ORDER BY size DESC")?;
@@ -180,19 +230,8 @@ pub fn treemap(conn: &Connection, path: Option<String>, max_children: usize) -> 
     let mut children: Vec<TreeNode> = Vec::new();
     let (name, size, crumbs) = match &path {
         None => {
-            let mut stmt = conn.prepare("SELECT path, name, size, file_count FROM files WHERE path = root ORDER BY size DESC")?;
-            let rows = stmt.query_map([], |r| {
-                Ok(TreeNode {
-                    path: r.get(0)?,
-                    name: r.get::<_, String>(0)?,
-                    size: r.get(2)?,
-                    is_dir: true,
-                    kind: "folder",
-                    file_count: r.get(3)?,
-                    other: false,
-                })
-            })?;
-            for n in rows {
+            let mut stmt = conn.prepare(&format!("SELECT {NODE_COLS} FROM files WHERE path = root ORDER BY size DESC"))?;
+            for n in stmt.query_map([], |r| node_from_row(r, true))? {
                 children.push(n?);
             }
             let total = children.iter().map(|c| c.size).sum();
@@ -203,41 +242,31 @@ pub fn treemap(conn: &Connection, path: Option<String>, max_children: usize) -> 
                 .query_row("SELECT name, size, root FROM files WHERE path = ?1", [p], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .optional()?
                 .unwrap_or_else(|| (p.clone(), 0, p.clone()));
-            let mut stmt = conn.prepare(
-                "SELECT path, name, size, is_dir, ext, file_count FROM files WHERE parent = ?1 AND size > 0 ORDER BY size DESC",
-            )?;
-            let rows = stmt.query_map([p], |r| {
-                let is_dir: bool = r.get(3)?;
-                let ext: String = r.get(4)?;
-                Ok(TreeNode {
-                    path: r.get(0)?,
-                    name: r.get(1)?,
-                    size: r.get(2)?,
-                    is_dir,
-                    kind: if is_dir { "folder" } else { kind_of(&ext) },
-                    file_count: if is_dir { r.get(5)? } else { 1 },
-                    other: false,
-                })
-            })?;
-            let mut other = (0i64, 0i64);
-            for (i, n) in rows.enumerate() {
+            let mut stmt =
+                conn.prepare(&format!("SELECT {NODE_COLS} FROM files WHERE parent = ?1 AND size > 0 ORDER BY size DESC"))?;
+            let mut other = (0i64, 0i64, 0usize);
+            for (i, n) in stmt.query_map([p], |r| node_from_row(r, false))?.enumerate() {
                 let n = n?;
                 if i < max_children {
                     children.push(n);
                 } else {
                     other.0 += n.size;
                     other.1 += n.file_count;
+                    other.2 += 1;
                 }
             }
             if other.0 > 0 {
                 children.push(TreeNode {
                     path: String::new(),
-                    name: "Everything else".into(),
+                    name: format!("{} more items", other.2),
                     size: other.0,
                     is_dir: false,
                     kind: "other",
                     file_count: other.1,
                     other: true,
+                    category: "other",
+                    category_share: 0.0,
+                    entries: other.2 as i64,
                 });
             }
             // Breadcrumbs from the root (or "All locations") down to here.
@@ -273,6 +302,8 @@ pub fn treemap(conn: &Connection, path: Option<String>, max_children: usize) -> 
 pub struct GrowthPoint {
     pub day: String,
     pub size: i64,
+    /// Estimated from file creation dates rather than a real daily snapshot.
+    pub estimated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -289,18 +320,27 @@ pub struct FolderGrowth {
 #[serde(rename_all = "camelCase")]
 pub struct Growth {
     pub points: Vec<GrowthPoint>,
+    /// True while part of the range is estimated from file dates.
+    pub estimated: bool,
     pub fastest: Option<FolderGrowth>,
     pub top_types: Vec<(String, i64, i64)>,
 }
 
 pub fn growth(conn: &Connection, days: i64) -> Result<Growth> {
-    let since = (chrono::Local::now() - chrono::Duration::days(days)).format("%Y-%m-%d").to_string();
-    let mut stmt = conn.prepare("SELECT day, size FROM snapshots WHERE kind = 'total' AND day >= ?1 ORDER BY day")?;
-    let points = stmt
-        .query_map([&since], |r| Ok(GrowthPoint { day: r.get(0)?, size: r.get(1)? }))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let since = (chrono::Local::now() - chrono::Duration::days(days - 1)).format("%Y-%m-%d").to_string();
+    let series = |kind: &str| -> Result<Vec<(String, i64)>> {
+        let mut stmt = conn.prepare("SELECT day, size FROM snapshots WHERE kind = ?1 AND day >= ?2 ORDER BY day")?;
+        let v = stmt.query_map(rusqlite::params![kind, since], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        Ok(v)
+    };
+    let real = series("total")?;
+    let est = series("total_est")?;
+    let points = blend(&real, &est, &since);
+    let estimated = points.iter().any(|p| p.estimated);
+    let real_points: Vec<GrowthPoint> =
+        real.iter().map(|(day, size)| GrowthPoint { day: day.clone(), size: *size, estimated: false }).collect();
     let mut fastest = None;
-    if let (Some(first), Some(last)) = (points.first(), points.last()) {
+    if let (Some(first), Some(last)) = (real_points.first(), real_points.last()) {
         if first.day != last.day {
             let mut stmt = conn.prepare(
                 "SELECT b.key, b.size, b.size - COALESCE(a.size, 0) AS delta
@@ -326,7 +366,27 @@ pub fn growth(conn: &Connection, days: i64) -> Result<Growth> {
         "SELECT key, size, count FROM snapshots WHERE kind = 'type' AND day = (SELECT MAX(day) FROM snapshots) ORDER BY size DESC LIMIT 8",
     )?;
     let top_types = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?;
-    Ok(Growth { points, fastest, top_types })
+    Ok(Growth { points, estimated, fastest, top_types })
+}
+
+/// Real snapshots where they exist; before the first one, the file-date
+/// estimate shifted so it meets the first real value exactly (no jump).
+pub fn blend(real: &[(String, i64)], est: &[(String, i64)], since: &str) -> Vec<GrowthPoint> {
+    let first_real = real.first().map(|(d, _)| d.as_str());
+    if first_real.map(|d| d <= since).unwrap_or(false) || est.is_empty() {
+        return real.iter().map(|(day, size)| GrowthPoint { day: day.clone(), size: *size, estimated: false }).collect();
+    }
+    let offset = match real.first() {
+        Some((d0, r0)) => est.iter().find(|(d, _)| d == d0).map(|(_, e)| r0 - e).unwrap_or(0),
+        None => 0,
+    };
+    let mut out: Vec<GrowthPoint> = est
+        .iter()
+        .filter(|(d, _)| first_real.map(|f| d.as_str() < f).unwrap_or(true))
+        .map(|(day, size)| GrowthPoint { day: day.clone(), size: (size + offset).max(0), estimated: true })
+        .collect();
+    out.extend(real.iter().map(|(day, size)| GrowthPoint { day: day.clone(), size: *size, estimated: false }));
+    out
 }
 
 // ---------------- Inbox (Downloads / Desktop) ----------------
@@ -383,7 +443,7 @@ pub fn duplicate_base(name: &str) -> Option<String> {
     (changed && !base.is_empty()).then(|| format!("{base}{ext}"))
 }
 
-pub fn inbox(conn: &Connection, settings: &Settings, limit: usize) -> Result<Inbox> {
+pub fn inbox(conn: &Connection, settings: &Settings, limit: usize, noise: &NoiseFilter) -> Result<Inbox> {
     let cutoff = now() - settings.inbox_days as i64 * 86_400;
     let mut items = Vec::new();
     let (mut total, mut total_size) = (0i64, 0i64);
@@ -399,7 +459,11 @@ pub fn inbox(conn: &Connection, settings: &Settings, limit: usize) -> Result<Inb
         let names: HashSet<String> = all.iter().map(|f| f.name.to_lowercase()).collect();
         for f in all {
             let arrived = f.created.unwrap_or(0).max(f.modified.unwrap_or(0));
-            if arrived == 0 || arrived > cutoff || f.ext == "lnk" || f.name.eq_ignore_ascii_case("desktop.ini") {
+            if arrived == 0
+                || arrived > cutoff
+                || f.name.eq_ignore_ascii_case("desktop.ini")
+                || noise.matches(&f.path, &f.name, Some(f.kind))
+            {
                 continue;
             }
             total += 1;
@@ -429,6 +493,56 @@ pub fn inbox(conn: &Connection, settings: &Settings, limit: usize) -> Result<Inb
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn growth_blends_estimate_into_real_snapshots() {
+        let d = |s: &str| s.to_string();
+        let est = vec![(d("2026-07-05"), 700), (d("2026-07-06"), 800), (d("2026-07-07"), 900), (d("2026-07-08"), 950)];
+        // First real snapshot on 07-07 is 1000 (the estimate said 900: deleted files it can't see).
+        let real = vec![(d("2026-07-07"), 1000), (d("2026-07-08"), 1100)];
+        let pts = blend(&real, &est, "2026-07-05");
+        let flat: Vec<(&str, i64, bool)> = pts.iter().map(|p| (p.day.as_str(), p.size, p.estimated)).collect();
+        assert_eq!(
+            flat,
+            vec![("2026-07-05", 800, true), ("2026-07-06", 900, true), ("2026-07-07", 1000, false), ("2026-07-08", 1100, false)]
+        );
+        // Once real data covers the range, the estimate disappears.
+        let covered = vec![(d("2026-07-05"), 10), (d("2026-07-06"), 20)];
+        assert!(blend(&covered, &est, "2026-07-05").iter().all(|p| !p.estimated));
+        // First launch: only an estimate and today's snapshot.
+        let first = blend(&[(d("2026-07-08"), 950)], &est, "2026-07-05");
+        assert_eq!(first.len(), 4);
+        assert_eq!(first.iter().filter(|p| p.estimated).count(), 3);
+    }
+
+    #[test]
+    fn estimate_history_counts_back_from_creation_dates() {
+        use rusqlite::params;
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open(tmp.path().join("t.db")).unwrap();
+        let conn = db.conn().unwrap();
+        let now = crate::db::now();
+        conn.execute("INSERT INTO files(path, parent, name, ext, is_dir, size, file_count, root) VALUES ('R', '', 'R', '', 1, 600, 3, 'R')", []).unwrap();
+        for (i, (age_days, size)) in [(200, 100), (10, 200), (0, 300)].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO files(path, parent, name, ext, is_dir, size, created, root) VALUES (?1, 'R', ?1, '', 0, ?2, ?3, 'R')",
+                params![format!("f{i}"), size, now - age_days * 86_400],
+            )
+            .unwrap();
+        }
+        crate::snapshots::estimate_history(&conn, 90).unwrap();
+        let est: Vec<(String, i64)> = conn
+            .prepare("SELECT day, size FROM snapshots WHERE kind = 'total_est' ORDER BY day")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(est.len(), 90);
+        assert_eq!(est.first().unwrap().1, 100, "90 days ago only the old file existed");
+        assert_eq!(est.last().unwrap().1, 600, "today matches the real total");
+        assert!(est.windows(2).all(|w| w[0].1 <= w[1].1), "never shrinks going forward");
+    }
 
     #[test]
     fn duplicate_names() {

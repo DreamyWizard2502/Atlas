@@ -10,7 +10,22 @@ pub struct Db {
     path: PathBuf,
 }
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// v2: content-sniffed kind and storage category per file; per-category byte
+/// totals per folder (treemap colors). Filled in by the next scan.
+const MIGRATE_V2: &str = r#"
+ALTER TABLE files ADD COLUMN kind TEXT;
+ALTER TABLE files ADD COLUMN cat INTEGER NOT NULL DEFAULT 7;
+ALTER TABLE files ADD COLUMN cb0 INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN cb1 INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN cb2 INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN cb3 INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN cb4 INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN cb5 INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN cb6 INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE files ADD COLUMN cb7 INTEGER NOT NULL DEFAULT 0;
+"#;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
@@ -147,8 +162,13 @@ impl Db {
         let conn = db.conn()?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version < SCHEMA_VERSION {
+        if version < 1 {
             conn.execute_batch(SCHEMA)?;
+        }
+        if version < 2 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V2} COMMIT;"))?;
+        }
+        if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(db)
@@ -223,6 +243,33 @@ mod tests {
             assert!(r"C:\a\b\c.txt" >= lo.as_str() && r"C:\a\b\c.txt" < hi.as_str());
             assert!(!(r"C:\a\bc\x" >= lo.as_str() && r"C:\a\bc\x" < hi.as_str()));
         }
+    }
+
+    #[test]
+    fn migrates_a_v1_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("v1.db");
+        {
+            // A database as the first release created it.
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.pragma_update(None, "user_version", 1).unwrap();
+            c.execute(
+                r"INSERT INTO files(path, parent, name, ext, is_dir, size, root) VALUES ('C:\a.txt', 'C:\', 'a.txt', 'txt', 0, 5, 'C:\')",
+                [],
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let c = db.conn().unwrap();
+        let v: i64 = c.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        let (kind, cat, cb7): (Option<String>, i64, i64) =
+            c.query_row("SELECT kind, cat, cb7 FROM files", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!((kind, cat, cb7), (None, 7, 0));
+        drop(c);
+        // Opening again is a no-op.
+        Db::open(&path).unwrap();
     }
 
     #[test]

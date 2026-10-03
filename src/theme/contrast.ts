@@ -39,6 +39,27 @@ export function hueSat(hex: string): { hue: number; sat: number } {
   return { hue: (hue + 360) % 360, sat };
 }
 
+/** Perceptual distance between two colors (OKLab, scaled x100). */
+export function deltaE(a: string, b: string): number {
+  const lab = (hex: string) => {
+    const n = parseInt(hex.slice(1), 16);
+    const [r, g, bl] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(channel);
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * bl);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * bl);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * bl);
+    return [
+      0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+      1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+      0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+    ];
+  };
+  const [x, y] = [lab(a), lab(b)];
+  return Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]) * 100;
+}
+
+/** Treemap storage-category tiles, in `classify::CATEGORIES` order. */
+export const CATEGORY_TOKENS = ["catGames", "catCad", "catDocuments", "catMedia", "catCode", "catArchives", "catTemp", "catOther"] as const;
+
 export const AA_TEXT = 4.5;
 export const AA_NON_TEXT = 3;
 
@@ -64,7 +85,7 @@ export const CONTRAST_PAIRS: Pair[] = [
   ...pairs(["cold"], ["bg", "surface", "surface2"], AA_TEXT, "cold-file labels"),
   ...pairs(["onAccent"], ["accent", "accentStrong"], AA_TEXT, "primary button text (rest and hover)"),
   ...pairs(["onSuccess"], ["greenMark"], AA_TEXT, "success button text"),
-  ...pairs(["text", "text2"], ["accentTile", "fileTile", "coldTile"], AA_TEXT, "treemap tile labels"),
+  ...pairs(["text", "text2"], [...CATEGORY_TOKENS], AA_TEXT, "treemap tile labels"),
   // Graphical objects that carry meaning: bars, meters, timeline dots.
   ...pairs(["accent", "amberMark", "greenMark"], ["surface"], AA_NON_TEXT, "meaningful marks"),
 ];

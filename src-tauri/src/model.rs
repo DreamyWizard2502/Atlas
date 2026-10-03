@@ -1,3 +1,4 @@
+use rusqlite::types::Value;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -17,18 +18,21 @@ pub struct FileItem {
 }
 
 /// Columns expected by `FileItem::from_row`, for a `files` table aliased as `f`.
-pub const FILE_COLS: &str = "f.id, f.path, f.parent, f.name, f.ext, f.is_dir, f.size, f.created, f.modified, f.accessed";
+pub const FILE_COLS: &str = "f.id, f.path, f.parent, f.name, f.ext, f.is_dir, f.size, f.created, f.modified, f.accessed, f.kind";
+/// Index of the first column after `FILE_COLS`.
+pub const FILE_COLS_LEN: usize = 11;
 
 impl FileItem {
     pub fn from_row(r: &rusqlite::Row) -> rusqlite::Result<FileItem> {
         let ext: String = r.get(4)?;
         let is_dir: bool = r.get(5)?;
+        let stored: Option<String> = r.get(10)?;
         Ok(FileItem {
             id: r.get(0)?,
             path: r.get(1)?,
             parent: r.get(2)?,
             name: r.get(3)?,
-            kind: if is_dir { "folder" } else { kind_of(&ext) },
+            kind: if is_dir { "folder" } else { stored_kind(stored.as_deref(), &ext) },
             ext,
             is_dir,
             size: r.get(6)?,
@@ -62,6 +66,42 @@ pub const KINDS: &[(&str, &[&str])] = &[
     ("font", &["ttf", "otf", "woff", "woff2"]),
 ];
 
+/// Kinds that only content sniffing can assign.
+pub const SNIFFED_KINDS: &[&str] = &["object"];
+
+/// The kind stored by the indexer (content-confirmed), or the extension's kind
+/// for rows indexed before kinds were stored.
+pub fn stored_kind(stored: Option<&str>, ext: &str) -> &'static str {
+    match stored {
+        Some(k) => KINDS
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(SNIFFED_KINDS.iter().copied())
+            .chain(["folder", "other"])
+            .find(|name| *name == k)
+            .unwrap_or("other"),
+        None => kind_of(ext),
+    }
+}
+
+/// SQL condition (over alias `a`) for files of type `t` (a `type:` value or a
+/// space "kind" rule). Known types use the stored, content-confirmed kind, so a
+/// compiled `.obj` is never counted as CAD; unknown names match an extension.
+pub fn type_condition(t: &str, a: &str, vals: &mut Vec<Value>) -> String {
+    let exts = exts_for_type(t);
+    match canonical_type(t) {
+        Some(kind) => {
+            vals.push(Value::Text(kind.to_string()));
+            vals.extend(exts.iter().cloned().map(Value::Text));
+            format!("({a}.kind = ? OR ({a}.kind IS NULL AND {a}.ext IN ({})))", vec!["?"; exts.len()].join(","))
+        }
+        None => {
+            vals.extend(exts.into_iter().map(Value::Text));
+            format!("{a}.ext = ?")
+        }
+    }
+}
+
 pub fn kind_of(ext: &str) -> &'static str {
     for (kind, exts) in KINDS {
         if exts.contains(&ext) {
@@ -71,10 +111,14 @@ pub fn kind_of(ext: &str) -> &'static str {
     "other"
 }
 
-/// Extensions for a `type:` value. Unknown names are treated as an extension.
-pub fn exts_for_type(t: &str) -> Vec<String> {
-    let t = t.to_lowercase();
-    let alias = match t.as_str() {
+/// The kind name for a `type:` value, if it names a known kind.
+pub fn canonical_type(t: &str) -> Option<&'static str> {
+    let alias = type_alias(&t.to_lowercase());
+    KINDS.iter().map(|(k, _)| *k).find(|k| *k == alias)
+}
+
+fn type_alias(t: &str) -> String {
+    match t {
         "images" | "photo" | "photos" | "picture" | "pictures" => "image",
         "videos" | "movie" | "movies" => "video",
         "music" | "sound" => "audio",
@@ -85,11 +129,17 @@ pub fn exts_for_type(t: &str) -> Vec<String> {
         "installers" | "exe" | "setup" => "installer",
         "3d" | "model" | "models" => "cad",
         other => other,
-    };
+    }
+    .to_string()
+}
+
+/// Extensions for a `type:` value. Unknown names are treated as an extension.
+pub fn exts_for_type(t: &str) -> Vec<String> {
+    let alias = type_alias(&t.to_lowercase());
     for (kind, exts) in KINDS {
         if *kind == alias {
             return exts.iter().map(|s| s.to_string()).collect();
         }
     }
-    vec![t.trim_start_matches('.').to_string()]
+    vec![alias.trim_start_matches('.').to_string()]
 }

@@ -160,7 +160,7 @@ pub fn start_scan(app: &AppHandle, st: &Shared) {
                         .ok()
                         .and_then(|c| kv_get(&c, "cleanup_summary").ok().flatten())
                         .and_then(|s| serde_json::from_str::<crate::cleanup::CleanupSummary>(&s).ok())
-                        .map(|s| now() - s.analyzed_at > 12 * 3600)
+                        .map(|s| !s.is_current() || now() - s.analyzed_at > 12 * 3600)
                         .unwrap_or(true);
                     if stale && !p.cancelled {
                         start_analysis(&app, &st);

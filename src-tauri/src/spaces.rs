@@ -2,7 +2,7 @@
 //! Files are never moved; a space is just a saved query.
 
 use crate::db::{now, subtree_range};
-use crate::model::{exts_for_type, FileItem, FILE_COLS};
+use crate::model::{type_condition, FileItem, FILE_COLS};
 use anyhow::{anyhow, Result};
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -74,12 +74,17 @@ fn rule_sql(rule: &Rule, out: &mut Vec<Value>) -> Option<String> {
             out.push(Value::Text(format!("%{}%", like_escape(v))));
             "f.name LIKE ? ESCAPE '\\'".into()
         }
-        "ext" | "kind" => {
-            let exts: Vec<String> = v
-                .split([',', ' '])
-                .filter(|s| !s.is_empty())
-                .flat_map(|s| if rule.field == "kind" { exts_for_type(s) } else { vec![s.trim_start_matches('.').to_lowercase()] })
-                .collect();
+        "kind" => {
+            let conds: Vec<String> =
+                v.split([',', ' ']).filter(|s| !s.is_empty()).map(|t| type_condition(t, "f", out)).collect();
+            if conds.is_empty() {
+                return None;
+            }
+            format!("({})", conds.join(" OR "))
+        }
+        "ext" => {
+            let exts: Vec<String> =
+                v.split([',', ' ']).filter(|s| !s.is_empty()).map(|s| s.trim_start_matches('.').to_lowercase()).collect();
             if exts.is_empty() {
                 return None;
             }
@@ -173,6 +178,36 @@ pub fn list(conn: &Connection) -> Result<Vec<Space>> {
         out.push(Space { id, name, icon, rules, pinned, count, size, last_activity: last });
     }
     Ok(out)
+}
+
+/// Names of the spaces that include `path`. One indexed lookup per space; no
+/// counting (unlike `list`).
+pub fn names_containing(conn: &Connection, path: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id, name, rules_json FROM spaces ORDER BY name")?;
+    let rows: Vec<(i64, String, String)> =
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?;
+    let mut out = Vec::new();
+    for (id, name, json) in rows {
+        let rules: SpaceRules = serde_json::from_str(&json).unwrap_or_default();
+        let (w, mut vals) = space_where(id, &rules);
+        vals.push(Value::Text(path.to_string()));
+        let hit = conn
+            .query_row(&format!("SELECT 1 FROM files f WHERE f.path = ? AND {w}"), params_from_iter(rotate_last_first(vals)), |_| Ok(()))
+            .optional()?
+            .is_some();
+        if hit {
+            out.push(name);
+        }
+    }
+    Ok(out)
+}
+
+/// Move the last value to the front (the path binds first in `names_containing`).
+fn rotate_last_first(mut v: Vec<Value>) -> Vec<Value> {
+    if let Some(last) = v.pop() {
+        v.insert(0, last);
+    }
+    v
 }
 
 pub fn save(conn: &Connection, input: &SpaceInput) -> Result<i64> {

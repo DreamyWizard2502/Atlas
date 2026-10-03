@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { CommandPalette } from "./components/CommandPalette";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ContextMenu, Dialogs, Toasts } from "./components/Overlays";
 import { QuickLook } from "./components/QuickLook";
 import { Onboarding, Rail, ScanBanner } from "./components/Shell";
-import { Spinner } from "./components/ui";
+import { Button, Empty, Spinner } from "./components/ui";
 import { api, on, type ScanProgress } from "./lib/api";
 import { formatCount } from "./lib/format";
 import { isTypingTarget } from "./lib/hooks";
@@ -111,18 +112,35 @@ export default function App() {
       <main className="flex min-w-0 flex-1 flex-col">
         <ScanBanner />
         <div className="min-h-0 flex-1">
-          {screen === "dashboard" && <Dashboard />}
-          {screen === "spaces" && <Spaces />}
-          {screen === "timeline" && <Timeline />}
-          {screen === "cleanup" && <Cleanup />}
-          {screen === "folders" && <Folders />}
-          {screen === "settings" && <SettingsScreen />}
+          <ErrorBoundary
+            resetKey={screen}
+            fallback={(e, retry) => (
+              <Empty
+                title="This view hit a problem"
+                body={`${e.message}. The rest of Atlas is fine; try again or switch views.`}
+                action={<Button onClick={retry}>Try again</Button>}
+              />
+            )}
+          >
+            {screen === "dashboard" && <Dashboard />}
+            {screen === "spaces" && <Spaces />}
+            {screen === "timeline" && <Timeline />}
+            {screen === "cleanup" && <Cleanup />}
+            {screen === "folders" && <Folders />}
+            {screen === "settings" && <SettingsScreen />}
+          </ErrorBoundary>
         </div>
       </main>
-      <CommandPalette />
-      <QuickLook />
-      <ContextMenu />
-      <Dialogs />
+      <ErrorBoundary fallback={() => null}>
+        <CommandPalette />
+      </ErrorBoundary>
+      <ErrorBoundary fallback={() => null}>
+        <QuickLook />
+      </ErrorBoundary>
+      <ErrorBoundary fallback={() => null}>
+        <ContextMenu />
+        <Dialogs />
+      </ErrorBoundary>
       <Toasts />
     </div>
   );

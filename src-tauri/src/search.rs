@@ -5,7 +5,7 @@
 //!   modified:today | yesterday | this week | last week | this month | last month | this year | 7d
 //!   in:"Space name"   folder:true (folders only)
 
-use crate::model::{exts_for_type, FileItem, FILE_COLS};
+use crate::model::{type_condition, FileItem, FILE_COLS};
 use anyhow::Result;
 use chrono::{Datelike, Duration, Local, NaiveDate, TimeZone};
 use rusqlite::types::Value;
@@ -16,6 +16,9 @@ use serde::Serialize;
 #[serde(rename_all = "camelCase")]
 pub struct ParsedQuery {
     pub text: Vec<String>,
+    /// `type:` values (matched by content-confirmed kind).
+    pub types: Vec<String>,
+    /// `ext:` values (matched by extension only).
     pub exts: Vec<String>,
     pub size_min: Option<i64>,
     pub size_max: Option<i64>,
@@ -118,7 +121,7 @@ pub fn parse_at(q: &str, today: NaiveDate) -> ParsedQuery {
         match key.as_str() {
             "type" | "kind" => {
                 for v in val.split(',').filter(|s| !s.is_empty()) {
-                    pq.exts.extend(exts_for_type(v));
+                    pq.types.push(v.to_lowercase());
                 }
                 pq.chips.push(format!("type: {val}"));
             }
@@ -217,9 +220,16 @@ pub struct SearchResult {
 
 fn filters_sql(conn: &Connection, pq: &ParsedQuery, vals: &mut Vec<Value>, unknown_space: &mut bool) -> Result<Vec<String>> {
     let mut w = Vec::new();
+    let mut any_type = Vec::new();
+    for t in &pq.types {
+        any_type.push(type_condition(t, "f", vals));
+    }
     if !pq.exts.is_empty() {
-        w.push(format!("f.ext IN ({})", vec!["?"; pq.exts.len()].join(",")));
+        any_type.push(format!("f.ext IN ({})", vec!["?"; pq.exts.len()].join(",")));
         vals.extend(pq.exts.iter().cloned().map(Value::Text));
+    }
+    if !any_type.is_empty() {
+        w.push(format!("({})", any_type.join(" OR ")));
     }
     if let Some(n) = pq.size_min {
         w.push("f.size > ? AND f.is_dir = 0".into());
@@ -319,7 +329,7 @@ mod tests {
     fn parses_filters_and_text() {
         let pq = parse_at("bracket type:pdf size:>500mb modified:this week in:\"Client work\"", d(2026, 10, 2));
         assert_eq!(pq.text, vec!["bracket"]);
-        assert_eq!(pq.exts, vec!["pdf"]);
+        assert_eq!(pq.types, vec!["pdf"]);
         assert_eq!(pq.size_min, Some(500 * 1024 * 1024));
         assert_eq!(pq.space.as_deref(), Some("Client work"));
         // 2026-10-02 is a Friday; the week starts Monday 2026-09-28.
@@ -332,7 +342,8 @@ mod tests {
         let pq = parse_at("ext:sldprt,.STEP", d(2026, 1, 1));
         assert_eq!(pq.exts, vec!["sldprt", "step"]);
         let pq = parse_at("type:image", d(2026, 1, 1));
-        assert!(pq.exts.contains(&"png".to_string()));
+        assert_eq!(pq.types, vec!["image"]);
+        assert!(pq.exts.is_empty());
         assert!(pq.text.is_empty());
     }
 

@@ -1,3 +1,4 @@
+pub mod classify;
 pub mod cleanup;
 pub mod commands;
 pub mod dashboard;
@@ -5,6 +6,7 @@ pub mod db;
 pub mod folders;
 pub mod indexer;
 pub mod model;
+pub mod noise;
 pub mod platform;
 pub mod preview;
 pub mod search;
@@ -30,7 +32,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let data_dir = app.path().app_local_data_dir()?;
+            // ATLAS_DATA_DIR runs an isolated profile (own index, settings and
+            // holding area), e.g. for QA next to a normal instance.
+            let data_dir = match std::env::var_os("ATLAS_DATA_DIR") {
+                Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
+                _ => app.path().app_local_data_dir()?,
+            };
             let st: state::Shared = Arc::new(state::AppState::new(data_dir)?);
             app.manage(st.clone());
 
@@ -73,6 +80,7 @@ pub fn run() {
             commands::reveal_file,
             commands::file_details,
             commands::read_text_preview,
+            commands::preview_probe,
             commands::list_tags,
             commands::add_tag,
             commands::remove_tag,

@@ -7,6 +7,10 @@ use crate::{dashboard, folders, preview, search, snapshots, spaces, timeline};
 use rusqlite::params;
 use std::sync::atomic::AtomicBool;
 
+fn no_noise() -> std::sync::Arc<crate::noise::NoiseFilter> {
+    std::sync::Arc::new(crate::noise::NoiseFilter::default())
+}
+
 /// Join with native separators (Path::join keeps a literal '/' inside the string).
 fn j(base: &std::path::Path, rel: &str) -> std::path::PathBuf {
     rel.split('/').fold(base.to_path_buf(), |p, seg| p.join(seg))
@@ -81,7 +85,7 @@ fn every_query_path_runs_against_a_real_index() {
         params![j(&root, "Photos/trip.jpg").to_string_lossy(), crate::db::now() + 5],
     )
     .unwrap();
-    let sessions = dashboard::jump_back_in(&conn, 8, 45).unwrap();
+    let sessions = dashboard::jump_back_in(&conn, 8, 45, &no_noise()).unwrap();
     assert_eq!(sessions.iter().map(|s| s.files.len()).sum::<usize>(), 5);
     assert!(sessions[0].files[0].opened);
     let tm = dashboard::treemap(&conn, None, 60).unwrap();
@@ -102,7 +106,7 @@ fn every_query_path_runs_against_a_real_index() {
     let g = dashboard::growth(&conn, 365 * 40).unwrap();
     assert!(g.points.len() >= 2);
     assert_eq!(g.fastest.as_ref().unwrap().name, "Photos");
-    dashboard::inbox(&conn, &settings, 100).unwrap();
+    dashboard::inbox(&conn, &settings, 100, &no_noise()).unwrap();
 
     // Timeline (with and without filters, plus a deletion event).
     conn.execute(
@@ -110,13 +114,13 @@ fn every_query_path_runs_against_a_real_index() {
         [crate::db::now()],
     )
     .unwrap();
-    let t = timeline::page(&conn, None, 100, &timeline::TimelineFilter::default()).unwrap();
+    let t = timeline::page(&conn, None, 100, &timeline::TimelineFilter::default(), &no_noise()).unwrap();
     assert_eq!(t.len(), 6);
-    let t = timeline::page(&conn, None, 100, &timeline::TimelineFilter { kind: Some("pdf".into()), space_id: None }).unwrap();
+    let t = timeline::page(&conn, None, 100, &timeline::TimelineFilter { kind: Some("pdf".into()), space_id: None }, &no_noise()).unwrap();
     assert_eq!(t.len(), 2);
-    let t = timeline::page(&conn, None, 100, &timeline::TimelineFilter { kind: None, space_id: Some(id) }).unwrap();
+    let t = timeline::page(&conn, None, 100, &timeline::TimelineFilter { kind: None, space_id: Some(id) }, &no_noise()).unwrap();
     assert_eq!(t.len(), 3);
-    let older = timeline::page(&conn, Some(t[0].ts), 100, &timeline::TimelineFilter::default()).unwrap();
+    let older = timeline::page(&conn, Some(t[0].ts), 100, &timeline::TimelineFilter::default(), &no_noise()).unwrap();
     assert!(older.len() <= 6);
 
     // Folders view + preview.
@@ -172,7 +176,75 @@ fn bench_scan() {
     eprintln!("search filters: {} hits in {:?}", r.items.len(), t3.elapsed());
     let t4 = std::time::Instant::now();
     dashboard::treemap(&conn, None, 60).unwrap();
-    dashboard::jump_back_in(&conn, 8, 45).unwrap();
+    dashboard::jump_back_in(&conn, 8, 45, &no_noise()).unwrap();
     eprintln!("treemap + jump back in: {:?}", t4.elapsed());
     assert_eq!(p.files as usize, n);
+}
+
+#[test]
+fn activity_views_hide_noise_but_search_still_finds_it() {
+    // Generated under target/ rather than %TEMP%: category and exclusion rules
+    // deliberately treat anything inside a Temp folder as temp.
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("test-fixtures");
+    std::fs::create_dir_all(&base).unwrap();
+    let tmp = tempfile::tempdir_in(&base).unwrap();
+    let root = tmp.path().join("home");
+    let mk = |rel: &str, data: &[u8]| {
+        let p = j(&root, rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, data).unwrap();
+    };
+    let coff = [0x64u8, 0x86, 4, 0, 0xd8, 0xfd, 0x32, 0xef, 0xbe, 1, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, b'.', b'd', b'r'];
+    mk("proj/target/release/deps/atlas_lib.rlib", &[1; 4000]);
+    mk("proj/target/release/build/blake3-1/out/flag_check.obj", &coff);
+    mk("Desktop/flag_check.obj", &coff); // a compiled object outside any build folder
+    mk(".claude/projects/x/21f0af00-0b59-4f8f-b5f3-cab588b519c5.jsonl", b"{}\n");
+    mk("Documents/report.pdf", b"%PDF-1.7 report");
+    mk("CAD/cube.obj", b"o Cube\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+    mk("Media/clip.mp4", &[0; 9000]);
+
+    let db = Db::open(tmp.path().join("atlas.db")).unwrap();
+    let settings = Settings { roots: vec![root.to_string_lossy().to_string()], excluded: vec![], ..Default::default() };
+    let excl = Exclusions::new(&settings, &[]);
+    crate::indexer::scan(&db, &[root.clone()], &excl, &AtomicBool::new(false), |_| {}).unwrap();
+    let conn = db.conn().unwrap();
+    // The default list with `~` = this fixture's home. (The fixture itself lives
+    // under the real %TEMP%, which the defaults hide, so point TEMP elsewhere.)
+    let other_temp = tmp.path().join("elsewhere").to_string_lossy().to_string();
+    let noise = std::sync::Arc::new(crate::noise::NoiseFilter::with_env(&settings.activity_exclusions, Some(&root), |v| {
+        (v == "TEMP").then(|| other_temp.clone())
+    })
+    .with_roots(&settings.roots));
+
+    let recent: Vec<String> = dashboard::jump_back_in(&conn, 20, 45, &noise)
+        .unwrap()
+        .into_iter()
+        .flat_map(|s| s.files.into_iter().map(|f| f.file.name))
+        .collect();
+    let mut recent_sorted = recent.clone();
+    recent_sorted.sort();
+    assert_eq!(recent_sorted, vec!["clip.mp4", "cube.obj", "report.pdf"], "{recent:?}");
+    let feed: Vec<String> = timeline::page(&conn, None, 100, &timeline::TimelineFilter::default(), &noise)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(feed.len(), 3, "{feed:?}");
+
+    // Still searchable.
+    assert!(!search::run(&conn, "atlas_lib", 50).unwrap().items.is_empty());
+    assert_eq!(search::run(&conn, "flag_check", 50).unwrap().items.len(), 2);
+    // Content decides the type: the Wavefront model is CAD, the MSVC objects aren't.
+    let cad: Vec<String> = search::run(&conn, "type:cad", 50).unwrap().items.into_iter().map(|f| f.name).collect();
+    assert_eq!(cad, vec!["cube.obj"]);
+    let objs = search::run(&conn, "flag_check", 50).unwrap().items;
+    assert!(objs.iter().all(|f| f.kind == "object"));
+
+    // Treemap tiles carry their dominant category.
+    let tm = dashboard::treemap(&conn, Some(root.to_string_lossy().to_string()), 60).unwrap();
+    let cat = |name: &str| tm.children.iter().find(|c| c.name == name).map(|c| c.category).unwrap();
+    assert_eq!(cat("Documents"), "documents");
+    assert_eq!(cat("CAD"), "cad");
+    assert_eq!(cat("Media"), "media");
+    assert_eq!(cat("proj"), "code");
 }

@@ -4,7 +4,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { FileIcon } from "../components/FileIcon";
 import { fileHandlers } from "../components/FileViews";
 import { Button, Checkbox, Empty, Modal, Pill, Segmented, Spinner } from "../components/ui";
-import { api, on, type AnalyzeProgress, type Candidate, type CleanupState, type HeldItem, type LogEntry, type RunReport } from "../lib/api";
+import {
+  api,
+  on,
+  type AnalyzeProgress,
+  type Candidate,
+  type CategorySummary,
+  type CleanupState,
+  type HeldItem,
+  type LogEntry,
+  type RunReport,
+} from "../lib/api";
 import { errorMessage, restoreBatch } from "../lib/actions";
 import { formatBytes, formatCount, formatDate, plural, relativeTime, shortPath } from "../lib/format";
 import { useLoad } from "../lib/hooks";
@@ -12,7 +22,7 @@ import { bumpData, toast, useStore, type FileRef } from "../lib/store";
 
 const DESCRIPTIONS: Record<string, string> = {
   duplicates: "Files with identical content. Nothing is selected — pick the copy to keep in each group.",
-  large_cold: "Big files nobody has modified in a long time.",
+  large_cold: "Big files nobody has modified in a long time. They're not junk, so they don't count as reclaimable: archive or remove only what you're sure about.",
   temp: "Files older than a day in temp folders and known browser/app caches.",
   junk: "CAD backups, autosaves, lock files and Office ~$ files, from your rule list in Settings.",
   installers: "Setup files in Downloads you probably don't need any more.",
@@ -153,31 +163,50 @@ function Review() {
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-auto px-2 pb-3">
-          {s?.categories.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              onClick={() => setCategory(c.id)}
-              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-100 ${
-                category === c.id ? "bg-accent-soft" : "hover:bg-surface-2"
-              }`}
-            >
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-[13px] font-medium">{c.label}</div>
-                <div className="text-[11.5px] text-ink-3">
-                  {c.id === "duplicates" ? plural(c.count, "group") : plural(c.count, "item")}
-                  {c.truncated && " (first 20,000)"}
-                </div>
+          {(s?.categories ?? [])
+            .filter((c) => c.group !== "review")
+            .map((c) => (
+              <CategoryButton key={c.id} c={c} active={category === c.id} onClick={() => setCategory(c.id)} />
+            ))}
+          {(s?.categories ?? []).some((c) => c.group === "review") && (
+            <div className="mt-4 border-t border-line pt-3">
+              <div className="flex items-baseline justify-between px-3 pb-1">
+                <span className="text-xs font-medium text-ink-2">Review or archive</span>
+                <span className="tabular text-xs text-cold">{formatBytes(s?.reviewTotal ?? 0)}</span>
               </div>
-              <span className={`tabular text-xs font-medium ${c.reclaimable > 0 ? "text-green" : "text-ink-3"}`}>{formatBytes(c.reclaimable)}</span>
-            </button>
-          ))}
+              <p className="px-3 pb-2 text-[11.5px] text-ink-3">Big files nobody has opened in a long time. Not counted as reclaimable: decide case by case.</p>
+              {(s?.categories ?? [])
+                .filter((c) => c.group === "review")
+                .map((c) => (
+                  <CategoryButton key={c.id} c={c} review active={category === c.id} onClick={() => setCategory(c.id)} />
+                ))}
+            </div>
+          )}
         </div>
       </aside>
       <section className="min-w-0 flex-1">
         <CategoryReview key={`${category}-${s?.analyzedAt}`} category={category} onRan={refresh} />
       </section>
     </div>
+  );
+}
+
+function CategoryButton({ c, active, review, onClick }: { c: CategorySummary; active: boolean; review?: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-100 ${active ? "bg-accent-soft" : "hover:bg-surface-2"}`}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] font-medium">{c.label}</div>
+        <div className="text-[11.5px] text-ink-3">
+          {c.id === "duplicates" ? plural(c.count, "group") : plural(c.count, "item")}
+          {c.truncated && " (first 20,000)"}
+        </div>
+      </div>
+      <span className={`tabular text-xs font-medium ${review ? "text-cold" : c.reclaimable > 0 ? "text-green" : "text-ink-3"}`}>{formatBytes(c.reclaimable)}</span>
+    </button>
   );
 }
 

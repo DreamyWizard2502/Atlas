@@ -16,6 +16,8 @@ drive) rather than by path. The folder tree is still there, as a secondary view.
                │ Tauri commands (JSON)                                  │ events
 ┌──────────────┴───────────────────────── Rust (src-tauri) ─────────────┴─────────────────┐
 │ commands.rs    thin #[tauri::command] layer; heavy work runs in spawn_blocking          │
+│ classify.rs    content sniffing for ambiguous extensions (.obj), storage categories    │
+│ noise.rs       activity exclusions (Jump Back In / Timeline / inbox), SQL function    │
 │ platform/      OS abstraction (known folders, disk space, attributes, lock check,       │
 │                installed apps, system roots). windows.rs now; other OSes later.         │
 │ db.rs          SQLite (rusqlite, bundled, WAL), schema + migrations, FTS5               │
@@ -61,11 +63,14 @@ files(
   attrs INTEGER NOT NULL DEFAULT 0, -- platform attribute bits (hidden/system)
   root TEXT NOT NULL,             -- indexed location this row belongs to
   gen INTEGER NOT NULL DEFAULT 0, -- scan generation (mark & sweep on rescan)
-  hash TEXT, hash_key TEXT        -- blake3 cache, valid while hash_key = size:mtime
+  hash TEXT, hash_key TEXT,       -- blake3 cache, valid while hash_key = size:mtime
+  kind TEXT,                      -- v2: content-confirmed kind (e.g. "object" for MSVC .obj)
+  cat INTEGER,                    -- v2: storage category of a file (classify::CATEGORIES)
+  cb0 .. cb7 INTEGER              -- v2: folders: recursive bytes per storage category
 )
 files_fts  -- FTS5 external-content table over files(name), unicode61, prefix 2/3,
            -- kept in sync with triggers
-snapshots(day TEXT, kind TEXT /*total|folder|type*/, key TEXT, size INTEGER,
+snapshots(day TEXT, kind TEXT /*total|total_est|folder|type*/, key TEXT, size INTEGER,
           count INTEGER, PRIMARY KEY(day, kind, key))
 events(id, ts, kind /*deleted*/, path, name, ext, size)
                                      -- deletions seen by the watcher (timeline);

@@ -1,31 +1,20 @@
 // Spacebar Quick Look: images, PDF, text/code, video, audio; metadata card for
-// everything else. Esc closes, ←/→ step through the list it was opened from.
+// everything else. The preview mode comes from the file's *contents* (backend
+// probe), never its extension alone, and every failure (unexpected bytes, a
+// file that vanishes or is locked mid-read, a render error) degrades to the
+// metadata card. Esc closes, ←/→ step through the list it was opened from.
 import { ChevronLeft, ChevronRight, ExternalLink, FolderOpen, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, assetUrl, type FileDetails } from "../lib/api";
+import { api, assetUrl, type FileDetails, type Probe } from "../lib/api";
 import { errorMessage, openFile, revealFile } from "../lib/actions";
 import { formatBytes, formatDate, formatCount } from "../lib/format";
 import { select, setState, useStore, type FileRef } from "../lib/store";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { FileIcon, kindLabel } from "./FileIcon";
 import { IconButton, Pill, Spinner } from "./ui";
 
-const IMAGE = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "ico", "avif"]);
-const VIDEO = new Set(["mp4", "webm", "m4v", "mov", "ogv"]);
-const AUDIO = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac", "aac", "opus"]);
-const TEXT_EXTRA = new Set(["csv", "tsv", "md", "log", "gitignore", "env", "editorconfig", "svg"]);
-
-type Mode = "image" | "video" | "audio" | "pdf" | "text" | "meta";
-
-function modeFor(f: FileRef): Mode {
-  const ext = (f.ext ?? "").toLowerCase();
-  if (f.isDir) return "meta";
-  if (IMAGE.has(ext)) return "image";
-  if (VIDEO.has(ext)) return "video";
-  if (AUDIO.has(ext)) return "audio";
-  if (ext === "pdf") return "pdf";
-  if (f.kind === "text" || f.kind === "code" || TEXT_EXTRA.has(ext)) return "text";
-  return "meta";
-}
+/** Lines rendered in a text preview (the backend already caps bytes). */
+const MAX_LINES = 4000;
 
 export function QuickLook() {
   const open = useStore((s) => s.quickLook);
@@ -65,7 +54,6 @@ function QuickLookInner({ file }: { file: FileRef }) {
     return () => window.removeEventListener("keydown", onKey, true);
   });
 
-  const mode = modeFor(file);
   return (
     <div className="anim-fade fixed inset-0 z-50 flex items-center justify-center bg-[var(--overlay)] p-8" onMouseDown={close}>
       <div
@@ -102,20 +90,37 @@ function QuickLookInner({ file }: { file: FileRef }) {
         </header>
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 items-center justify-center bg-surface-2">
-            <Preview key={file.path} file={file} mode={mode} />
+            <ErrorBoundary resetKey={file.path} fallback={() => <MetaFallback file={file} note="Atlas couldn't show a preview of this file." />}>
+              <Preview key={file.path} file={file} />
+            </ErrorBoundary>
           </div>
-          <Details key={`d-${file.path}`} file={file} />
+          <ErrorBoundary resetKey={file.path} fallback={() => <aside className="w-[260px] shrink-0 border-l border-line p-4 text-xs text-ink-3">Details unavailable.</aside>}>
+            <Details key={`d-${file.path}`} file={file} />
+          </ErrorBoundary>
         </div>
       </div>
     </div>
   );
 }
 
-function Preview({ file, mode }: { file: FileRef; mode: Mode }) {
+function Preview({ file }: { file: FileRef }) {
+  const [probe, setProbe] = useState<Probe | null>(null);
   const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api
+      .probe(file.path)
+      .then((p) => alive && setProbe(p))
+      .catch((e) => alive && setProbe({ exists: false, isDir: false, size: 0, mode: "none", kind: file.kind, note: errorMessage(e) }));
+    return () => {
+      alive = false;
+    };
+  }, [file.path, file.kind]);
+  if (!probe) return <Spinner size={18} />;
+  const shown = { ...file, kind: probe.kind };
+  if (failed) return <MetaFallback file={shown} note="This file couldn't be previewed. It may have changed or been removed." />;
   const src = assetUrl(file.path);
-  if (failed) return <MetaFallback file={file} note="This file can't be previewed here." />;
-  switch (mode) {
+  switch (probe.mode) {
     case "image":
       return <img src={src} alt="" draggable={false} onError={() => setFailed(true)} className="max-h-full max-w-full object-contain p-4" />;
     case "video":
@@ -128,11 +133,11 @@ function Preview({ file, mode }: { file: FileRef; mode: Mode }) {
         </div>
       );
     case "pdf":
-      return <iframe src={src} title={file.name} className="h-full w-full border-0 bg-surface" />;
+      return <iframe src={src} title={file.name} onError={() => setFailed(true)} className="h-full w-full border-0 bg-surface" />;
     case "text":
-      return <TextPreview file={file} />;
+      return <TextPreview file={shown} />;
     default:
-      return <MetaFallback file={file} />;
+      return <MetaFallback file={shown} note={probe.note ?? undefined} />;
   }
 }
 
@@ -143,7 +148,8 @@ function TextPreview({ file }: { file: FileRef }) {
   }, [file.path]);
   if (!state) return <Spinner size={18} />;
   if ("error" in state) return <MetaFallback file={file} note={state.error} />;
-  const lines = state.text.split(/\r?\n/);
+  const all = state.text.split(/\r?\n/);
+  const lines = all.slice(0, MAX_LINES);
   return (
     <div className="selectable h-full w-full overflow-auto bg-surface">
       <pre className="min-w-fit p-4 font-mono text-[12px] leading-[1.6] text-ink">
@@ -153,7 +159,7 @@ function TextPreview({ file }: { file: FileRef }) {
             <span className="whitespace-pre">{l || " "}</span>
           </div>
         ))}
-        {state.truncated && <div className="mt-3 text-ink-3">… preview truncated</div>}
+        {(state.truncated || all.length > MAX_LINES) && <div className="mt-3 text-ink-3">… preview truncated</div>}
       </pre>
     </div>
   );
@@ -177,7 +183,7 @@ function Details({ file }: { file: FileRef }) {
   }, [file.path]);
   return (
     <aside className="w-[260px] shrink-0 overflow-auto border-l border-line p-4 text-xs">
-      {err && <p className="text-amber">{err}</p>}
+      {err && <p className="text-ink-2">{err}</p>}
       {!d && !err && <Spinner />}
       {d && (
         <dl className="space-y-3">

@@ -11,6 +11,13 @@ pub mod rules;
 
 use serde::{Deserialize, Serialize};
 
+/// Summary format version; cached summaries from older versions are ignored.
+pub const SUMMARY_VERSION: u32 = 2;
+
+/// Categories that are reviewed, not counted as reclaimable: removing them is a
+/// judgment call (old but possibly important), not cleanup.
+pub const REVIEW_CATEGORIES: &[&str] = &["large_cold"];
+
 pub const CATEGORIES: &[(&str, &str)] = &[
     ("duplicates", "Duplicates"),
     ("large_cold", "Large and cold files"),
@@ -43,6 +50,9 @@ pub struct CategorySummary {
     /// Bytes that cleaning would free. For duplicates: all copies but one.
     pub reclaimable: i64,
     pub truncated: bool,
+    /// "reclaim" (counts toward the reclaimable total) or "review" (review or archive).
+    #[serde(default)]
+    pub group: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -51,6 +61,20 @@ pub struct CleanupSummary {
     pub analyzed_at: i64,
     pub total_reclaimable: i64,
     pub categories: Vec<CategorySummary>,
+    /// Bytes in review-or-archive categories (large and cold files), never part
+    /// of `total_reclaimable`.
+    #[serde(default)]
+    pub review_total: i64,
+    #[serde(default)]
+    pub version: u32,
+}
+
+impl CleanupSummary {
+    /// Summaries cached by older versions counted large and cold files as
+    /// reclaimable; they're treated as missing until re-analyzed.
+    pub fn is_current(&self) -> bool {
+        self.version >= SUMMARY_VERSION
+    }
 }
 
 /// One item the user chose in the review list.

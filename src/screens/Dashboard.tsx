@@ -1,11 +1,26 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Archive, ArrowRight, Check, ChevronRight, Command, HardDrive, Inbox as InboxIcon, Layers, Search, Sparkles, TrendingUp } from "lucide-react";
+import {
+  Archive,
+  ArrowRight,
+  Check,
+  ChevronRight,
+  Command,
+  HardDrive,
+  Inbox as InboxIcon,
+  Layers,
+  LayoutGrid,
+  List,
+  Search,
+  Sparkles,
+  TrendingUp,
+} from "lucide-react";
 import { useMemo, useRef, useState } from "react";
-import { GrowthChart, ReclaimBars, Treemap, TreemapLegend } from "../components/Charts";
+import { GrowthChart, ReclaimBars, StorageList, Treemap, TreemapLegend } from "../components/Charts";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { FileCard, fileHandlers } from "../components/FileViews";
 import { FileIcon } from "../components/FileIcon";
-import { Button, Card, Checkbox, Empty, Pill, Spinner } from "../components/ui";
-import { api, type InboxItem, type Metrics } from "../lib/api";
+import { Button, Card, Checkbox, Empty, Modal, Pill, Segmented, Spinner } from "../components/ui";
+import { api, type InboxItem, type Metrics, type TreeNode } from "../lib/api";
 import { errorMessage, moveToHolding, toRef } from "../lib/actions";
 import { formatBytes, formatCount, plural, relativeTime, sessionLabel, shortPath } from "../lib/format";
 import { useLoad } from "../lib/hooks";
@@ -16,19 +31,51 @@ export function Dashboard() {
     <div className="h-full overflow-auto">
       <div className="mx-auto flex max-w-[1480px] flex-col gap-4 px-6 pb-8 pt-5">
         <SearchBar />
-        <MetricCards />
-        <JumpBackIn />
+        <Safe>
+          <MetricCards />
+        </Safe>
+        <Safe>
+          <JumpBackIn />
+        </Safe>
         <div className="grid grid-cols-12 gap-4">
-          <StorageCard />
-          <GrowthCard />
+          <Safe span="xl:col-span-8">
+            <StorageCard />
+          </Safe>
+          <Safe span="xl:col-span-4">
+            <GrowthCard />
+          </Safe>
         </div>
         <div className="grid grid-cols-12 gap-4">
-          <InboxCard />
-          <CleanupCard />
+          <Safe span="xl:col-span-7">
+            <InboxCard />
+          </Safe>
+          <Safe span="xl:col-span-5">
+            <CleanupCard />
+          </Safe>
         </div>
-        <PinnedSpaces />
+        <Safe>
+          <PinnedSpaces />
+        </Safe>
       </div>
     </div>
+  );
+}
+
+/** One failing widget shows its own small error instead of blanking the dashboard. */
+function Safe({ children, span }: { children: React.ReactNode; span?: string }) {
+  return (
+    <ErrorBoundary
+      fallback={(e, retry) => (
+        <div className={`card col-span-12 flex items-center gap-3 px-4 py-3 text-xs text-ink-2 ${span ?? ""}`}>
+          <span className="flex-1">This card couldn't load ({e.message}).</span>
+          <Button size="sm" onClick={retry}>
+            Try again
+          </Button>
+        </div>
+      )}
+    >
+      {children}
+    </ErrorBoundary>
   );
 }
 
@@ -186,7 +233,13 @@ function JumpBackIn() {
 
 function StorageCard() {
   const [path, setPath] = useState<string | null>(null);
+  const [view, setView] = useState<"map" | "list">("map");
+  const [group, setGroup] = useState<{ label: string; items: TreeNode[] } | null>(null);
   const { data: tm, loading, error } = useLoad(() => api.treemap(path), [path]);
+  const zoom = (p: string) => {
+    setGroup(null);
+    setPath(p);
+  };
   return (
     <Card
       className="col-span-12 xl:col-span-8"
@@ -212,21 +265,44 @@ function StorageCard() {
           "Click a folder to zoom in"
         )
       }
-      action={<TreemapLegend />}
+      action={
+        <Segmented
+          value={view}
+          onChange={setView}
+          options={[
+            { value: "map", label: <LayoutGrid size={13} />, title: "Treemap" },
+            { value: "list", label: <List size={13} />, title: "Sorted list" },
+          ]}
+        />
+      }
     >
-      <div className="h-[330px]">
-        {error ? (
-          <Empty title="Couldn't load storage" body={error} />
-        ) : tm && tm.children.length > 0 ? (
-          <Treemap nodes={tm.children} total={tm.size} onZoom={setPath} />
-        ) : loading ? (
-          <div className="flex h-full items-center justify-center">
-            <Spinner />
-          </div>
-        ) : (
-          <Empty title="No data yet" body="The treemap appears once indexing finishes." />
-        )}
+      <div className="flex h-[330px] flex-col gap-2">
+        <div className="min-h-0 flex-1">
+          {error ? (
+            <Empty title="Couldn't load storage" body={error} />
+          ) : tm && tm.children.length > 0 ? (
+            view === "map" ? (
+              <Treemap nodes={tm.children} total={tm.size} onZoom={zoom} onOpenGroup={(items, label) => setGroup({ items, label })} />
+            ) : (
+              <StorageList nodes={tm.children} total={tm.size} onZoom={zoom} />
+            )
+          ) : loading ? (
+            <div className="flex h-full items-center justify-center">
+              <Spinner />
+            </div>
+          ) : (
+            <Empty title="No data yet" body="The treemap appears once indexing finishes." />
+          )}
+        </div>
+        {tm && tm.children.length > 0 && <TreemapLegend nodes={tm.children} />}
       </div>
+      {group && tm && (
+        <Modal title={`${group.label} · ${formatBytes(group.items.reduce((a, n) => a + n.size, 0))}`} onClose={() => setGroup(null)} width={620}>
+          <div className="h-[420px]">
+            <StorageList nodes={group.items} total={tm.size} onZoom={zoom} />
+          </div>
+        </Modal>
+      )}
     </Card>
   );
 }
@@ -237,7 +313,11 @@ function GrowthCard() {
   const { data: g } = useLoad(() => api.growth(90));
   const points = g?.points ?? [];
   return (
-    <Card className="col-span-12 xl:col-span-4" title="Drive growth" subtitle="Indexed size, last 90 days">
+    <Card
+      className="col-span-12 xl:col-span-4"
+      title="Drive growth"
+      subtitle={g?.estimated ? "Indexed size, last 90 days · dashed part estimated from file dates" : "Indexed size, last 90 days"}
+    >
       <div className="flex h-[330px] flex-col gap-3">
         <div className="min-h-0 flex-1">
           {points.length >= 2 ? (
@@ -476,10 +556,22 @@ function CleanupCard() {
             </div>
             <div className="min-h-0 flex-1 overflow-auto">
               <ReclaimBars
-                rows={s.categories.map((c) => ({ id: c.id, label: c.label, value: c.reclaimable, count: c.count }))}
+                rows={s.categories
+                  .filter((c) => c.group !== "review")
+                  .map((c) => ({ id: c.id, label: c.label, value: c.reclaimable, count: c.count }))}
                 onClick={() => navigate("cleanup")}
               />
             </div>
+            {s.reviewTotal > 0 && (
+              <button
+                type="button"
+                onClick={() => navigate("cleanup")}
+                className="mt-2 flex items-center justify-between rounded-lg border border-line px-3 py-2 text-left text-xs hover:bg-surface-2"
+              >
+                <span className="text-ink-2">Review or archive: large files untouched for months</span>
+                <span className="tabular font-medium text-cold">{formatBytes(s.reviewTotal)}</span>
+              </button>
+            )}
           </>
         ) : (
           <Empty

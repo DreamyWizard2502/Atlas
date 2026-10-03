@@ -64,6 +64,91 @@ def fix(color, against, target, direction, cap=None):
     raise SystemExit(f'cannot reach {target} for {color} on {against}')
 
 
+def hsl(h, s_, l):
+    return rgb2hex(colorsys.hls_to_rgb(h / 360, l, s_))
+
+
+def oklab(h):
+    def lin(v):
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(v) for v in hex2rgb(h))
+    l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+    m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+    s_ = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+    l, m, s_ = (x ** (1 / 3) for x in (l, m, s_))
+    return (0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s_,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s_,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s_)
+
+
+def delta_e(a, b):
+    return sum((x - y) ** 2 for x, y in zip(oklab(a), oklab(b))) ** 0.5 * 100
+
+
+# Treemap storage categories. Chromatic hues sit outside the amber (30-60),
+# green (90-170) and red (330-20) bands so meaning colors stay unambiguous;
+# lightness is staggered so neighbours differ in more than hue.
+CATEGORY_HUES = [
+    ('catGames', 286, 0.02),
+    ('catCad', 180, 0.05),
+    ('catDocuments', 212, -0.03),
+    ('catMedia', 322, 0.00),
+    ('catCode', 244, -0.06),
+    ('catArchives', 72, 0.06),
+]
+CATS = ['catGames', 'catCad', 'catDocuments', 'catMedia', 'catCode', 'catArchives', 'catTemp', 'catOther']
+
+
+def categories(t, dark):
+    """Pick a lightness per category tile that keeps text and secondary text at
+    AA and makes the closest pair of tiles as different as possible
+    (coordinate descent over the allowed lightness band)."""
+    away = -1 if dark else 1  # direction that raises text contrast on a tile
+    sat = 0.62 if dark else 0.85
+    lo, hi = (0.14, 0.40) if dark else (0.68, 0.95)
+    grid = [lo + i * (hi - lo) / 13 for i in range(14)]
+    bg_hue = colorsys.rgb_to_hls(*hex2rgb(t['surface']))[0] * 360
+    specs = [(k, h, sat) for k, h, _ in CATEGORY_HUES] + [('catTemp', bg_hue, 0.05), ('catOther', bg_hue, 0.05)]
+
+    semantic = [colorsys.rgb_to_hls(*hex2rgb(t[k]))[0] * 360 for k in ('amber', 'green', 'danger')]
+
+    def hue_gap(c):
+        h = colorsys.rgb_to_hls(*hex2rgb(c))[0] * 360
+        return min(min(abs(h - x) % 360, 360 - abs(h - x) % 360) for x in semantic)
+
+    def tile(spec, l):
+        _, h, s_ = spec
+        if s_ <= 0.1:  # neutrals have no hue to collide with
+            return fix(mix(hsl(h, s_, l), t['surface'], 0.93), [t['text'], t['text2']], AA, away)
+        # Tinting toward the surface can drag a hue toward a meaning color; nudge
+        # the base hue away until the finished tile keeps clear of all three.
+        for dh in (0, 6, -6, 12, -12, 18, -18, 24, -24):
+            c = fix(mix(hsl((h + dh) % 360, s_, l), t['surface'], 0.93), [t['text'], t['text2']], AA, away)
+            if hue_gap(c) >= 18:
+                return c
+        raise SystemExit(f"{t['id']}: can't keep {spec[0]} clear of the meaning colors")
+
+    def score(tiles):
+        return min(delta_e(tiles[a], tiles[b]) for i, a in enumerate(CATS) for b in CATS[i + 1:])
+
+    mid = grid[len(grid) // 2]
+    light = {k: mid for k, _, _ in specs}
+    tiles = {spec[0]: tile(spec, light[spec[0]]) for spec in specs}
+    for _ in range(5):
+        for spec in specs:
+            k = spec[0]
+            best = (score(tiles), light[k], tiles[k])
+            for l in grid:
+                cand = tile(spec, l)
+                trial = dict(tiles)
+                trial[k] = cand
+                sc = score(trial)
+                if sc > best[0] + 1e-9:
+                    best = (sc, l, cand)
+            light[k], tiles[k] = best[1], best[2]
+    return tiles
+
+
 def build(p):
     dark = p['scheme'] == 'dark'
     up = 1 if dark else -1  # direction that increases text contrast
@@ -73,10 +158,6 @@ def build(p):
     t['accentSoft'] = mix(t['accent'], t['surface'], 0.16 if dark else 0.11)
     t['amberSoft'] = mix(t['amberMark'], t['surface'], 0.14 if dark else 0.16)
     t['greenSoft'] = mix(t['greenMark'], t['surface'], 0.14 if dark else 0.13)
-    # Treemap tiles: folders tinted with the accent, files neutral, the rest colder.
-    t['accentTile'] = mix(t['accent'], t['surface'], 0.30 if dark else 0.30)
-    t['fileTile'] = mix(t['text'], t['surface'], 0.13 if dark else 0.11)
-    t['coldTile'] = mix(t['text'], t['surface'], 0.07 if dark else 0.06)
 
     for _ in range(6):
         surfaces = [t['bg'], t['surface'], t['surface2']]
@@ -97,11 +178,10 @@ def build(p):
         t['onSuccess'] = t['bg'] if dark else t['surface']
         t['greenMark'] = fix(t['greenMark'], [t['onSuccess']], AA, up)
         t['amberMark'] = fix(t['amberMark'], [t['surface']], NONTEXT, up)
-        # Tiles must carry primary and secondary text.
-        for k in ('accentTile', 'fileTile', 'coldTile'):
-            t[k] = fix(t[k], [t['text'], t['text2']], AA, -up)
         t['amberSoft'] = mix(t['amberMark'], t['surface'], 0.14 if dark else 0.16)
         t['greenSoft'] = mix(t['greenMark'], t['surface'], 0.14 if dark else 0.13)
+
+    t.update(categories(t, dark))
 
     # Scrim and shadow are tinted from the palette, never pure black.
     if dark:
@@ -144,7 +224,7 @@ PALETTES = [
 ]
 
 ORDER = ['bg', 'surface', 'surface2', 'border', 'borderStrong', 'text', 'text2', 'text3',
-         'accent', 'accentStrong', 'accentSoft', 'onAccent', 'accentTile', 'fileTile', 'coldTile',
+         'accent', 'accentStrong', 'accentSoft', 'onAccent', *CATS,
          'amber', 'amberMark', 'amberSoft', 'green', 'greenMark', 'greenSoft', 'onSuccess',
          'danger', 'cold', 'overlay', 'shadow']
 
@@ -209,6 +289,10 @@ lines += [
 target = sys.argv[1]
 open(target, 'w', encoding='utf-8', newline='\n').write('\n'.join(lines))
 print(f'wrote {len(out)} palettes to {target}')
+print('closest pair of treemap categories (OKLab dE x100) per palette:')
+for t in out:
+    d, a, b = min((delta_e(t[x], t[y]), x, y) for i, x in enumerate(CATS) for y in CATS[i + 1:])
+    print(f"   {t['id']:9} {d:5.1f}  ({a} vs {b})")
 print('lightness nudges applied:')
 for c in changes:
     print('  ', c)

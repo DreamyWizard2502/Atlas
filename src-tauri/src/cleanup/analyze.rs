@@ -4,7 +4,7 @@ use super::blocklist::Blocklist;
 use super::duplicates::{self, DupInput};
 use super::holding::dir_has_files;
 use super::rules::CompiledRules;
-use super::{Candidate, CategorySummary, CleanupSummary, CATEGORIES};
+use super::{Candidate, CategorySummary, CleanupSummary, CATEGORIES, REVIEW_CATEGORIES};
 use crate::db::{now, subtree_range};
 use crate::platform;
 use crate::settings::Settings;
@@ -76,6 +76,35 @@ pub fn likely_installed(file_name: &str, installed: &[String]) -> Option<String>
         .cloned()
 }
 
+/// Program and game install folders: known launcher libraries and Program
+/// Files (by path), plus any folder holding an executable next to its
+/// libraries or packed assets, which covers portable apps and DRM-free games.
+#[derive(Debug, Default)]
+pub struct InstallDirs {
+    exe_dirs: HashSet<String>,
+}
+
+impl InstallDirs {
+    pub fn load(conn: &Connection) -> Result<Self> {
+        let mut stmt = conn.prepare(
+            "SELECT parent FROM files WHERE is_dir = 0 AND ext = 'exe'
+             INTERSECT
+             SELECT parent FROM files WHERE is_dir = 0 AND ext IN ('dll', 'pak', 'so', 'pck', 'ucas')",
+        )?;
+        let exe_dirs = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .map(|p| platform::norm(Path::new(&p)))
+            .collect();
+        Ok(InstallDirs { exe_dirs })
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        let lower = format!("{}\\", path.to_string_lossy().to_lowercase());
+        crate::classify::in_install_dir(&lower) || path.ancestors().any(|a| self.exe_dirs.contains(&platform::norm(a)))
+    }
+}
+
 /// Machine-specific inputs, injectable so tests never read real user folders.
 #[derive(Debug, Clone, Default)]
 pub struct AnalyzeEnv {
@@ -110,7 +139,10 @@ pub fn run(
     let t = now();
     let mut items: HashMap<String, Vec<Candidate>> = HashMap::new();
     let mut truncated: HashSet<String> = HashSet::new();
-    let ok = |p: &str| blocklist.check_path(Path::new(p)).is_ok();
+    // Program and game installs are never touched: moving a "duplicate" asset,
+    // a large file or an empty folder out of one can break the program.
+    let installs = InstallDirs::load(conn)?;
+    let ok = |p: &str| blocklist.check_path(Path::new(p)).is_ok() && !installs.contains(Path::new(p));
     let mut push = |cat: &str, c: Candidate, items: &mut HashMap<String, Vec<Candidate>>| {
         let v = items.entry(cat.to_string()).or_default();
         if v.len() < MAX_ITEMS {
@@ -346,7 +378,10 @@ pub fn run(
             })?
             .filter_map(|r| r.ok())
             .filter(|(i, attrs)| {
-                attrs & platform::ATTR_CLOUD == 0 && !platform::is_system(*attrs) && blocklist.check_path(Path::new(&i.path)).is_ok()
+                attrs & platform::ATTR_CLOUD == 0
+                    && !platform::is_system(*attrs)
+                    && blocklist.check_path(Path::new(&i.path)).is_ok()
+                    && !installs.contains(Path::new(&i.path))
             })
             .map(|(i, _)| i)
             .collect();
@@ -391,7 +426,9 @@ pub fn run(
     let mut categories = Vec::new();
     let mut counted: HashSet<String> = HashSet::new();
     let mut total = 0i64;
+    let mut review_total = 0i64;
     for (id, _) in CATEGORIES {
+        let review = REVIEW_CATEGORIES.contains(id);
         let list = items.get(*id).map(|v| v.as_slice()).unwrap_or(&[]);
         let reclaimable = if *id == "duplicates" {
             let mut by_group: HashMap<u32, (i64, i64)> = HashMap::new();
@@ -409,7 +446,9 @@ pub fn run(
         } else {
             list.len()
         };
-        if *id == "duplicates" {
+        if review {
+            review_total += reclaimable;
+        } else if *id == "duplicates" {
             total += reclaimable;
         } else {
             for c in list {
@@ -424,10 +463,17 @@ pub fn run(
             count,
             reclaimable,
             truncated: truncated.contains(*id),
+            group: if review { "review" } else { "reclaim" }.into(),
         });
     }
     Ok(Analysis {
-        summary: CleanupSummary { analyzed_at: t, total_reclaimable: total, categories },
+        summary: CleanupSummary {
+            analyzed_at: t,
+            total_reclaimable: total,
+            categories,
+            review_total,
+            version: super::SUMMARY_VERSION,
+        },
         items,
         dup_groups,
     })
@@ -436,6 +482,69 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn program_and_game_installs_are_never_cleanup_candidates() {
+        use crate::db::Db;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(400 * 86_400);
+        let mk = |rel: &str, data: &[u8]| {
+            let p = rel.split('/').fold(root.clone(), |p, s| p.join(s));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, data).unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+            p
+        };
+        let blob = vec![7u8; 80_000];
+        // Duplicate assets inside launcher libraries and installs.
+        mk("SteamLibrary/steamapps/common/Game/data/a.pak", &blob);
+        mk("SteamLibrary/steamapps/common/Game/data/b.pak", &blob);
+        mk("Epic Games/Shooter/Content/x.ucas", &[blob.clone(), vec![1]].concat());
+        mk("Epic Games/Shooter/Content/y.ucas", &[blob.clone(), vec![1]].concat());
+        mk("Program Files/Tool/res/one.dat", &[blob.clone(), vec![2]].concat());
+        mk("Program Files/Tool/res/two.dat", &[blob.clone(), vec![2]].concat());
+        mk("GOG Games/Quest/music/m1.ogg", &[blob.clone(), vec![3]].concat());
+        mk("GOG Games/Quest/music/m2.ogg", &[blob.clone(), vec![3]].concat());
+        // A portable app or DRM-free game anywhere: an exe next to its libraries.
+        mk("Tools/PortableApp/app.exe", b"MZ app");
+        mk("Tools/PortableApp/engine.dll", b"MZ dll");
+        mk("Tools/PortableApp/assets/t1.dds", &[blob.clone(), vec![4]].concat());
+        mk("Tools/PortableApp/assets/t2.dds", &[blob.clone(), vec![4]].concat());
+        mk("Tools/PortableApp/backup.bak", b"junk-looking but part of the app");
+        std::fs::create_dir_all(root.join("Tools/PortableApp/plugins")).unwrap();
+        // Downloads has a setup.exe but no libraries: still a normal folder.
+        mk("Downloads/setup.exe", b"MZ setup");
+        mk("Downloads/photo.jpg", &[blob.clone(), vec![5]].concat());
+        mk("Downloads/photo (1).jpg", &[blob.clone(), vec![5]].concat());
+
+        let db = Db::open(tmp.path().join("t.db")).unwrap();
+        let mut settings = Settings { roots: vec![root.to_string_lossy().to_string()], excluded: vec![], ..Default::default() };
+        settings.cold_min_mb = 0;
+        let excl = crate::settings::Exclusions::new(&settings, &[]);
+        crate::indexer::scan(&db, &[root.clone()], &excl, &AtomicBool::new(false), |_| {}).unwrap();
+        let bl = Blocklist::default();
+        let a = run(&db.conn().unwrap(), &settings, &AnalyzeEnv::default(), &bl, &AtomicBool::new(false), |_, _, _| {}).unwrap();
+
+        let dup_names: Vec<&str> = a.items.get("duplicates").map(|v| v.iter().map(|c| c.name.as_str()).collect()).unwrap_or_default();
+        assert_eq!(dup_names.len(), 2, "{dup_names:?}");
+        assert!(dup_names.iter().all(|n| n.starts_with("photo")), "{dup_names:?}");
+        for (cat, list) in &a.items {
+            if cat == "temp" {
+                continue;
+            }
+            for c in list {
+                let p = c.path.to_lowercase();
+                assert!(
+                    !(p.contains("steamlibrary") || p.contains("epic games") || p.contains("program files") || p.contains("gog games") || p.contains("portableapp")),
+                    "{cat} offered an install file: {}",
+                    c.path
+                );
+            }
+        }
+        // Large and cold Downloads files are still offered for review.
+        assert!(a.items["large_cold"].iter().any(|c| c.name == "photo.jpg"));
+    }
 
     #[test]
     fn installer_guess() {
@@ -492,6 +601,14 @@ mod tests {
         assert_eq!(dup_summary.reclaimable, 70_000);
         let empties: Vec<&str> = a.items["empty_folders"].iter().map(|c| c.name.as_str()).collect();
         assert_eq!(empties, vec!["empty"]);
+        // Large and cold files are listed for review but never counted as reclaimable.
+        let cold = a.summary.categories.iter().find(|c| c.id == "large_cold").unwrap();
+        assert_eq!(cold.group, "review");
+        assert!(cold.reclaimable > 0);
+        assert_eq!(a.summary.review_total, cold.reclaimable);
+        let reclaim: i64 = a.summary.categories.iter().filter(|c| c.group == "reclaim").map(|c| c.reclaimable).sum();
+        assert!(a.summary.total_reclaimable <= reclaim);
+        assert!(a.summary.is_current());
         let temps: Vec<&str> = a.items["temp"].iter().map(|c| c.name.as_str()).collect();
         assert_eq!(temps, vec!["stale.tmp"]);
         // Nothing inside .git, ever.

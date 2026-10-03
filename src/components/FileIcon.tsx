@@ -1,4 +1,5 @@
 import {
+  Binary,
   Box,
   File,
   FileArchive,
@@ -32,8 +33,12 @@ const ICONS: Record<Kind, LucideIcon> = {
   cad: Box,
   installer: Package,
   font: Type,
+  object: Binary,
   other: File,
 };
+
+/** Largest image the thumbnail/Quick Look paths load (whole-file reads). */
+export const MAX_THUMB_BYTES = 24 * 1024 * 1024;
 
 export function FileIcon({ kind, size = 16, className = "" }: { kind: Kind; size?: number; className?: string }) {
   const Icon = ICONS[kind] ?? File;
@@ -48,9 +53,10 @@ export function canThumb(ext?: string) {
 }
 
 /** Image thumbnail via the asset protocol, falling back to the type icon. */
-export function Thumb({ path, ext, kind, iconSize = 28 }: { path: string; ext?: string; kind: Kind; iconSize?: number }) {
+export function Thumb({ path, ext, kind, size, iconSize = 28 }: { path: string; ext?: string; kind: Kind; size?: number | null; iconSize?: number }) {
   const [failed, setFailed] = useState(false);
-  if (canThumb(ext) && !failed) {
+  // Anything that isn't really an image (or is huge) falls back to the icon.
+  if (canThumb(ext) && !failed && (size == null || (size > 0 && size <= MAX_THUMB_BYTES))) {
     return (
       <img
         src={assetUrl(path)}
@@ -72,6 +78,7 @@ export function Thumb({ path, ext, kind, iconSize = 28 }: { path: string; ext?: 
 
 export function kindLabel(kind: Kind, ext?: string): string {
   if (kind === "folder") return "Folder";
+  if (kind === "object") return "Compiled object file";
   if (ext) return `${ext.toUpperCase()} file`;
   return "File";
 }

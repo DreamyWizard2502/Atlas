@@ -22,6 +22,9 @@ pub struct Settings {
     pub archive_dir: String,
     pub junk_rules: Vec<JunkRule>,
     pub onboarded: bool,
+    /// Hidden from Jump Back In, the Timeline and the inbox (still searchable).
+    /// Syntax in `noise.rs`.
+    pub activity_exclusions: Vec<String>,
     /// "system" (match Windows), "light" or "dark".
     pub theme_mode: String,
     /// Palette ids used for the light and dark schemes.
@@ -50,6 +53,7 @@ impl Default for Settings {
                 .unwrap_or_default(),
             junk_rules: default_junk_rules(),
             onboarded: false,
+            activity_exclusions: crate::noise::default_activity_exclusions(),
             theme_mode: "system".into(),
             light_palette: "paper".into(),
             dark_palette: "graphite".into(),

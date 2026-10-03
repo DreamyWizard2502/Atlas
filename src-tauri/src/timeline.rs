@@ -1,8 +1,10 @@
 //! Change feed: file modifications from the index plus deletions observed by the
 //! watcher, newest first, paged by timestamp.
 
-use crate::model::{exts_for_type, kind_of};
+use crate::model::{exts_for_type, stored_kind, type_condition};
+use crate::noise::NoiseFilter;
 use anyhow::Result;
+use std::sync::Arc;
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
@@ -27,14 +29,23 @@ pub struct TimelineEntry {
     pub exists: bool,
 }
 
-pub fn page(conn: &Connection, before: Option<i64>, limit: i64, filter: &TimelineFilter) -> Result<Vec<TimelineEntry>> {
+/// One page of the change feed, minus activity exclusions (see `noise`).
+pub fn page(
+    conn: &Connection,
+    before: Option<i64>,
+    limit: i64,
+    filter: &TimelineFilter,
+    noise: &Arc<NoiseFilter>,
+) -> Result<Vec<TimelineEntry>> {
+    crate::noise::register(conn, noise.clone())?;
     let before = before.unwrap_or(i64::MAX);
-    let exts: Vec<String> = filter.kind.as_deref().filter(|k| !k.is_empty()).map(exts_for_type).unwrap_or_default();
-    let mut file_where = vec!["f.is_dir = 0".to_string(), "f.modified < ?".to_string()];
+    let kind = filter.kind.as_deref().filter(|k| !k.is_empty());
+    let exts: Vec<String> = kind.map(exts_for_type).unwrap_or_default();
+    let mut file_where =
+        vec!["f.is_dir = 0".to_string(), "f.modified < ?".to_string(), "NOT atlas_noise(f.path, f.name, f.kind)".to_string()];
     let mut vals: Vec<Value> = vec![Value::Integer(before)];
-    if !exts.is_empty() {
-        file_where.push(format!("f.ext IN ({})", vec!["?"; exts.len()].join(",")));
-        vals.extend(exts.iter().cloned().map(Value::Text));
+    if let Some(k) = kind {
+        file_where.push(type_condition(k, "f", &mut vals));
     }
     let mut include_deleted = true;
     if let Some(id) = filter.space_id {
@@ -48,12 +59,12 @@ pub fn page(conn: &Connection, before: Option<i64>, limit: i64, filter: &Timelin
     let mut sql = format!(
         "SELECT f.modified AS ts,
                 CASE WHEN ABS(COALESCE(f.created, 0) - f.modified) <= 5 THEN 'created' ELSE 'modified' END,
-                f.path, f.name, f.ext, f.size, 1
+                f.path, f.name, f.ext, f.size, 1, f.kind
          FROM files f WHERE {}",
         file_where.join(" AND ")
     );
     if include_deleted {
-        sql.push_str(" UNION ALL SELECT e.ts, e.kind, e.path, e.name, e.ext, e.size, 0 FROM events e WHERE e.kind = 'deleted' AND e.ts < ?");
+        sql.push_str(" UNION ALL SELECT e.ts, e.kind, e.path, e.name, e.ext, e.size, 0, NULL FROM events e WHERE e.kind = 'deleted' AND e.ts < ? AND NOT atlas_noise(e.path, e.name, NULL)");
         vals.push(Value::Integer(before));
         if !exts.is_empty() {
             sql.push_str(&format!(" AND e.ext IN ({})", vec!["?"; exts.len()].join(",")));
@@ -65,12 +76,13 @@ pub fn page(conn: &Connection, before: Option<i64>, limit: i64, filter: &Timelin
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(vals), |r| {
         let ext: String = r.get(4)?;
+        let stored: Option<String> = r.get(7)?;
         Ok(TimelineEntry {
             ts: r.get(0)?,
             change: r.get(1)?,
             path: r.get(2)?,
             name: r.get(3)?,
-            kind: kind_of(&ext),
+            kind: stored_kind(stored.as_deref(), &ext),
             ext,
             size: r.get(5)?,
             exists: r.get(6)?,

@@ -5,7 +5,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Kind =
   | "folder" | "image" | "video" | "audio" | "pdf" | "doc" | "sheet" | "slides"
-  | "text" | "code" | "archive" | "cad" | "installer" | "font" | "other";
+  | "text" | "code" | "archive" | "cad" | "installer" | "font" | "object" | "other";
+
+/** Storage categories for treemap colors (see classify.rs). */
+export type Category = "games" | "cad" | "documents" | "media" | "code" | "archives" | "temp" | "other";
 
 export interface FileItem {
   id: number;
@@ -52,6 +55,7 @@ export interface Metrics {
   inboxCount: number;
   inboxBytes: number;
   reclaimable: number | null;
+  reviewBytes: number | null;
   reclaimableAt: number | null;
 }
 
@@ -66,6 +70,10 @@ export interface TreeNode {
   kind: Kind;
   fileCount: number;
   other: boolean;
+  category: Category;
+  categoryShare: number;
+  /** Entries this node stands for (1, or N for a "more items" remainder). */
+  entries: number;
 }
 export interface Treemap {
   path: string | null;
@@ -75,8 +83,15 @@ export interface Treemap {
   children: TreeNode[];
 }
 
+export interface GrowthPoint {
+  day: string;
+  size: number;
+  /** Estimated from file creation dates, not a real daily snapshot. */
+  estimated: boolean;
+}
 export interface Growth {
-  points: { day: string; size: number }[];
+  points: GrowthPoint[];
+  estimated: boolean;
   fastest: { path: string; name: string; delta: number; size: number; since: string } | null;
   topTypes: [string, number, number][];
 }
@@ -147,8 +162,21 @@ export interface DirEntry {
   kind: Kind;
 }
 
-export interface CategorySummary { id: string; label: string; count: number; reclaimable: number; truncated: boolean }
-export interface CleanupSummary { analyzedAt: number; totalReclaimable: number; categories: CategorySummary[] }
+export interface CategorySummary {
+  id: string;
+  label: string;
+  count: number;
+  reclaimable: number;
+  truncated: boolean;
+  /** "reclaim" counts toward the reclaimable total; "review" is review-or-archive. */
+  group: "reclaim" | "review";
+}
+export interface CleanupSummary {
+  analyzedAt: number;
+  totalReclaimable: number;
+  reviewTotal: number;
+  categories: CategorySummary[];
+}
 export interface CleanupState { summary: CleanupSummary | null; hasItems: boolean; analyzing: boolean }
 export interface Candidate {
   path: string;
@@ -189,6 +217,7 @@ export interface Settings {
   sessionGapMin: number;
   archiveDir: string;
   junkRules: JunkRule[];
+  activityExclusions: string[];
   onboarded: boolean;
   themeMode: "system" | "light" | "dark";
   lightPalette: string;
@@ -221,6 +250,16 @@ export interface ScanProgress {
 
 export interface AnalyzeProgress { phase: string; done: number; total: number }
 
+/** How Quick Look should preview a file, decided from its contents. */
+export interface Probe {
+  exists: boolean;
+  isDir: boolean;
+  size: number;
+  mode: "image" | "video" | "audio" | "pdf" | "text" | "none";
+  kind: Kind;
+  note: string | null;
+}
+
 export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   defaultSettings: () => invoke<Settings>("default_settings"),
@@ -244,6 +283,7 @@ export const api = {
   openFile: (path: string) => invoke<void>("open_file", { path }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
   fileDetails: (path: string) => invoke<FileDetails>("file_details", { path }),
+  probe: (path: string) => invoke<Probe>("preview_probe", { path }),
   readText: (path: string, maxBytes?: number) =>
     invoke<{ text: string; truncated: boolean }>("read_text_preview", { path, maxBytes }),
 

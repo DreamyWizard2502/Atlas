@@ -4,12 +4,14 @@
 use crate::cleanup::holding::{self, RunContext};
 use crate::cleanup::{Candidate, CleanItem, CleanupSummary, ItemOutcome, RunReport};
 use crate::db::{kv_get, now};
+use crate::noise::NoiseFilter;
 use crate::settings::Settings;
 use crate::state::{self, Shared};
 use crate::{dashboard, folders, preview, search, spaces, timeline};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 type CmdResult<T> = Result<T, String>;
@@ -171,7 +173,8 @@ pub async fn jump_back_in(st: State<'_, Shared>, limit: Option<usize>) -> CmdRes
     blocking(move || {
         let conn = st.db.conn()?;
         let s = Settings::load(&conn)?;
-        dashboard::jump_back_in(&conn, limit.unwrap_or(8), s.session_gap_min)
+        let noise = Arc::new(NoiseFilter::new(&s.activity_exclusions).with_roots(&s.roots));
+        dashboard::jump_back_in(&conn, limit.unwrap_or(8), s.session_gap_min, &noise)
     })
     .await
 }
@@ -179,7 +182,7 @@ pub async fn jump_back_in(st: State<'_, Shared>, limit: Option<usize>) -> CmdRes
 #[tauri::command]
 pub async fn treemap(st: State<'_, Shared>, path: Option<String>) -> CmdResult<dashboard::Treemap> {
     let st = st.inner().clone();
-    blocking(move || dashboard::treemap(&st.db.conn()?, path.filter(|p| !p.is_empty()), 60)).await
+    blocking(move || dashboard::treemap(&st.db.conn()?, path.filter(|p| !p.is_empty()), 400)).await
 }
 
 #[tauri::command]
@@ -193,7 +196,8 @@ pub async fn inbox_items(st: State<'_, Shared>, limit: Option<usize>) -> CmdResu
     let st = st.inner().clone();
     blocking(move || {
         let conn = st.db.conn()?;
-        dashboard::inbox(&conn, &Settings::load(&conn)?, limit.unwrap_or(500))
+        let s = Settings::load(&conn)?;
+        dashboard::inbox(&conn, &s, limit.unwrap_or(500), &NoiseFilter::new(&s.activity_exclusions).with_roots(&s.roots))
     })
     .await
 }
@@ -291,6 +295,11 @@ pub async fn reveal_file(path: String) -> CmdResult<()> {
 pub async fn file_details(st: State<'_, Shared>, path: String) -> CmdResult<preview::FileDetails> {
     let st = st.inner().clone();
     blocking(move || preview::details(&st.db.conn()?, &path)).await
+}
+
+#[tauri::command]
+pub async fn preview_probe(path: String) -> CmdResult<preview::Probe> {
+    blocking(move || Ok(preview::probe(&path))).await
 }
 
 #[tauri::command]
@@ -409,7 +418,13 @@ pub async fn timeline(
     filter: Option<timeline::TimelineFilter>,
 ) -> CmdResult<Vec<timeline::TimelineEntry>> {
     let st = st.inner().clone();
-    blocking(move || timeline::page(&st.db.conn()?, before, limit.unwrap_or(200), &filter.unwrap_or_default())).await
+    blocking(move || {
+        let conn = st.db.conn()?;
+        let s = Settings::load(&conn)?;
+        let noise = Arc::new(NoiseFilter::new(&s.activity_exclusions).with_roots(&s.roots));
+        timeline::page(&conn, before, limit.unwrap_or(200), &filter.unwrap_or_default(), &noise)
+    })
+    .await
 }
 
 // ---------------- Folders ----------------
@@ -473,7 +488,9 @@ pub async fn cleanup_summary(st: State<'_, Shared>) -> CmdResult<CleanupState> {
         let has_items = st.analysis.lock().unwrap().is_some();
         let summary = match st.analysis.lock().unwrap().as_ref() {
             Some(a) => Some(a.summary.clone()),
-            None => kv_get(&st.db.conn()?, "cleanup_summary")?.and_then(|s| serde_json::from_str(&s).ok()),
+            None => kv_get(&st.db.conn()?, "cleanup_summary")?
+                .and_then(|s| serde_json::from_str::<CleanupSummary>(&s).ok())
+                .filter(|s| s.is_current()),
         };
         Ok(CleanupState { summary, has_items, analyzing: st.is_analyzing() })
     })
@@ -521,7 +538,10 @@ pub async fn cleanup_run(st: State<'_, Shared>, items: Vec<CleanItem>, dry_run: 
                         cat.reclaimable = list.iter().map(|c| c.size).sum();
                     }
                 }
-                a.summary.total_reclaimable = (a.summary.total_reclaimable - report.bytes).max(0);
+                // Large and cold files are never part of the reclaimable total.
+                let reclaim: i64 = a.summary.categories.iter().filter(|c| c.group != "review").map(|c| c.reclaimable).sum();
+                a.summary.review_total = a.summary.categories.iter().filter(|c| c.group == "review").map(|c| c.reclaimable).sum();
+                a.summary.total_reclaimable = reclaim.min(a.summary.total_reclaimable).max(0);
                 let _ = crate::db::kv_set(&conn, "cleanup_summary", &serde_json::to_string(&a.summary)?);
             }
         }
