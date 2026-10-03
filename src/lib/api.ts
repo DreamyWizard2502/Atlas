@@ -190,6 +190,9 @@ export interface Settings {
   archiveDir: string;
   junkRules: JunkRule[];
   onboarded: boolean;
+  themeMode: "system" | "light" | "dark";
+  lightPalette: string;
+  darkPalette: string;
 }
 
 export interface AppStatus {
@@ -222,6 +225,8 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   defaultSettings: () => invoke<Settings>("default_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
+  saveAppearance: (mode: Settings["themeMode"], lightPalette: string, darkPalette: string) =>
+    invoke<Settings>("save_appearance", { mode, lightPalette, darkPalette }),
   appStatus: () => invoke<AppStatus>("app_status"),
   startScan: () => invoke<void>("start_scan"),
   cancelScan: () => invoke<void>("cancel_scan"),

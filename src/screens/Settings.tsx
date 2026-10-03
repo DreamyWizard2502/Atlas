@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, FolderPlus, Plus, RefreshCw, RotateCcw, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { AppearanceSettings } from "../components/Appearance";
 import { Button, Card, IconButton, Spinner, TextInput } from "../components/ui";
 import { api, type JunkRule, type Settings } from "../lib/api";
 import { errorMessage } from "../lib/actions";
@@ -75,6 +76,7 @@ export function SettingsScreen() {
       </header>
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="mx-auto flex max-w-[860px] flex-col gap-4 px-6 py-5">
+          <AppearanceSettings />
           <Card title="Indexed locations" subtitle="Folders or drives Atlas keeps an index of. Changes trigger a re-index.">
             <PathList
               paths={s.roots}

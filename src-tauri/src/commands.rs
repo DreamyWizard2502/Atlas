@@ -42,6 +42,11 @@ pub async fn save_settings(app: AppHandle, st: State<'_, Shared>, settings: Sett
         let conn = st.db.conn()?;
         let old = Settings::load(&conn)?;
         let mut s = settings;
+        // Appearance is saved on its own (instantly, from Settings > Appearance);
+        // never let a stale copy from another form overwrite it.
+        s.theme_mode = old.theme_mode.clone();
+        s.light_palette = old.light_palette.clone();
+        s.dark_palette = old.dark_palette.clone();
         s.roots.retain(|r| !r.trim().is_empty());
         s.excluded.retain(|r| !r.trim().is_empty());
         s.save(&conn)?;
@@ -64,6 +69,33 @@ pub async fn save_settings(app: AppHandle, st: State<'_, Shared>, settings: Sett
         });
     }
     Ok(saved)
+}
+
+/// Persist only the appearance choices.
+#[tauri::command]
+pub async fn save_appearance(
+    st: State<'_, Shared>,
+    mode: String,
+    light_palette: String,
+    dark_palette: String,
+) -> CmdResult<Settings> {
+    if !matches!(mode.as_str(), "system" | "light" | "dark") {
+        return Err(format!("Unknown theme mode: {mode}"));
+    }
+    if light_palette.trim().is_empty() || dark_palette.trim().is_empty() {
+        return Err("Palette id can't be empty".into());
+    }
+    let st = st.inner().clone();
+    blocking(move || {
+        let conn = st.db.conn()?;
+        let mut s = Settings::load(&conn)?;
+        s.theme_mode = mode;
+        s.light_palette = light_palette;
+        s.dark_palette = dark_palette;
+        s.save(&conn)?;
+        Ok(s)
+    })
+    .await
 }
 
 #[derive(Serialize)]

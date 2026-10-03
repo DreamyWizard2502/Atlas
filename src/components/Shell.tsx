@@ -37,7 +37,7 @@ export function Rail() {
   };
   return (
     <nav className="flex w-[60px] shrink-0 flex-col items-center gap-1.5 border-r border-line bg-surface py-3">
-      <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-xl bg-accent text-sm font-semibold text-white" title="Atlas">
+      <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-xl bg-accent text-sm font-semibold text-on-accent" title="Atlas">
         A
       </div>
       <button
@@ -121,7 +121,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   return (
     <div className="flex h-full items-center justify-center overflow-auto p-8">
       <div className="anim-pop card w-full max-w-[560px] p-7">
-        <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-2xl bg-accent text-lg font-semibold text-white">A</div>
+        <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-2xl bg-accent text-lg font-semibold text-on-accent">A</div>
         <h1 className="text-xl font-semibold tracking-tight">Welcome to Atlas</h1>
         <p className="mt-1.5 text-[13.5px] text-ink-2">
           Atlas builds a private index of your files so search is instant and the dashboard can show what you're working on, what

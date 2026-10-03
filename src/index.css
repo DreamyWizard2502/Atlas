@@ -1,74 +1,17 @@
 @import "tailwindcss";
 
-/* Design tokens. One accent (blue). Color carries meaning only:
+/* Every color is a palette token. src/theme/theme.ts sets these variables on
+   <html> from the active palette (src/theme/palettes.ts); nothing here is a
+   literal color. Color carries meaning only: one accent per palette;
    amber = needs attention, green = reclaimable/cleaned, gray = cold. */
-:root {
-  color-scheme: light;
-  --bg: #f6f6f4;
-  --surface: #ffffff;
-  --surface-2: #f2f2ef;
-  --surface-3: #e9e9e5;
-  --border: #e4e3de;
-  --border-strong: #d3d2cc;
-  --text: #18181a;
-  --text-2: #52514e;
-  --text-3: #8a8984;
-  --accent: #2a78d6;
-  --accent-strong: #1c5cab;
-  --accent-soft: #e6f0fc;
-  --accent-tile: #b7d3f6;
-  --accent-tile-2: #9ec5f4;
-  --amber: #b26a00;
-  --amber-mark: #eda100;
-  --amber-soft: #fdf3dd;
-  --green: #18794e;
-  --green-mark: #1baf7a;
-  --green-soft: #e3f6ec;
-  --cold: #8a8984;
-  --cold-tile: #e4e3de;
-  --file-tile: #dcdbd6;
-  --danger: #c53030;
-  --overlay: rgba(20, 20, 18, 0.42);
-  --shadow: 0 8px 28px rgba(0, 0, 0, 0.08);
-}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --bg: #121211;
-    --surface: #1a1a19;
-    --surface-2: #222220;
-    --surface-3: #2a2a28;
-    --border: #2c2c2a;
-    --border-strong: #3a3a37;
-    --text: #f3f3f1;
-    --text-2: #c3c2b7;
-    --text-3: #8d8c86;
-    --accent: #3987e5;
-    --accent-strong: #6da7ec;
-    --accent-soft: #1b2a3d;
-    --accent-tile: #1c5cab;
-    --accent-tile-2: #256abf;
-    --amber: #f0b43c;
-    --amber-mark: #c98500;
-    --amber-soft: #33270f;
-    --green: #4cc38a;
-    --green-mark: #199e70;
-    --green-soft: #13291f;
-    --cold: #8d8c86;
-    --cold-tile: #2e2e2b;
-    --file-tile: #3a3a37;
-    --danger: #ef6b6b;
-    --overlay: rgba(0, 0, 0, 0.55);
-    --shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
-  }
-}
+/* `dark:` follows the chosen palette's scheme, not the OS. */
+@custom-variant dark (&:where([data-scheme="dark"], [data-scheme="dark"] *));
 
 @theme inline {
   --color-bg: var(--bg);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
-  --color-surface-3: var(--surface-3);
   --color-line: var(--border);
   --color-line-strong: var(--border-strong);
   --color-ink: var(--text);
@@ -77,12 +20,14 @@
   --color-accent: var(--accent);
   --color-accent-strong: var(--accent-strong);
   --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
   --color-amber: var(--amber);
   --color-amber-mark: var(--amber-mark);
   --color-amber-soft: var(--amber-soft);
   --color-green: var(--green);
   --color-green-mark: var(--green-mark);
   --color-green-soft: var(--green-soft);
+  --color-on-success: var(--on-success);
   --color-cold: var(--cold);
   --color-danger: var(--danger);
   --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;

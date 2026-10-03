@@ -22,6 +22,11 @@ pub struct Settings {
     pub archive_dir: String,
     pub junk_rules: Vec<JunkRule>,
     pub onboarded: bool,
+    /// "system" (match Windows), "light" or "dark".
+    pub theme_mode: String,
+    /// Palette ids used for the light and dark schemes.
+    pub light_palette: String,
+    pub dark_palette: String,
 }
 
 impl Default for Settings {
@@ -45,6 +50,9 @@ impl Default for Settings {
                 .unwrap_or_default(),
             junk_rules: default_junk_rules(),
             onboarded: false,
+            theme_mode: "system".into(),
+            light_palette: "paper".into(),
+            dark_palette: "graphite".into(),
         }
     }
 }
@@ -100,5 +108,33 @@ impl Exclusions {
             }
         }
         self.paths.iter().any(|p| crate::platform::is_within(path, p))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_saved_before_themes_load_with_theme_defaults() {
+        // Shape of a settings row written by an earlier version (no theme fields).
+        let old = r#"{"roots":["D:/work"],"excluded":[".git"],"inboxDays":21,"onboarded":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.inbox_days, 21);
+        assert!(s.onboarded);
+        assert_eq!((s.theme_mode.as_str(), s.light_palette.as_str(), s.dark_palette.as_str()), ("system", "paper", "graphite"));
+    }
+
+    #[test]
+    fn appearance_round_trips_through_the_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open(tmp.path().join("t.db")).unwrap();
+        let conn = db.conn().unwrap();
+        let mut s = Settings::load(&conn).unwrap();
+        s.theme_mode = "dark".into();
+        s.dark_palette = "midnight".into();
+        s.save(&conn).unwrap();
+        let back = Settings::load(&conn).unwrap();
+        assert_eq!((back.theme_mode.as_str(), back.dark_palette.as_str(), back.light_palette.as_str()), ("dark", "midnight", "paper"));
     }
 }

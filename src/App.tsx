@@ -8,6 +8,7 @@ import { api, on, type ScanProgress } from "./lib/api";
 import { formatCount } from "./lib/format";
 import { isTypingTarget } from "./lib/hooks";
 import { bumpData, getState, openQuickLook, setState, toast, useStore } from "./lib/store";
+import { setTheme } from "./theme/theme";
 import { Cleanup } from "./screens/Cleanup";
 import { Dashboard } from "./screens/Dashboard";
 import { Folders } from "./screens/Folders";
@@ -28,6 +29,11 @@ export default function App() {
 
   useEffect(() => {
     refreshStatus();
+    // Saved appearance is the source of truth; the local cache only avoids a flash.
+    api
+      .getSettings()
+      .then((s) => setTheme({ mode: s.themeMode, light: s.lightPalette, dark: s.darkPalette }))
+      .catch(() => {});
     let changeTimer: number | undefined;
     const subs = [
       on<ScanProgress>("scan://progress", (p) => setState({ scan: p })),

@@ -58,11 +58,11 @@ export function Button({
     "inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition-colors duration-100 disabled:opacity-45 disabled:pointer-events-none whitespace-nowrap";
   const sizes = { sm: "h-7 px-2.5 text-xs", md: "h-8 px-3 text-[13px]" };
   const variants: Record<BtnVariant, string> = {
-    primary: "bg-accent text-white hover:bg-accent-strong",
+    primary: "bg-accent text-on-accent hover:bg-accent-strong",
     secondary: "border border-line bg-surface text-ink hover:bg-surface-2",
     ghost: "text-ink-2 hover:bg-surface-2 hover:text-ink",
     danger: "border border-line bg-surface text-danger hover:bg-surface-2",
-    success: "bg-green-mark text-white hover:brightness-95",
+    success: "bg-green-mark text-on-success hover:brightness-95",
   };
   return (
     <button type={type} title={title} disabled={disabled} onClick={onClick} className={`${base} ${sizes[size]} ${variants[variant]} ${className}`}>

@@ -57,6 +57,7 @@ pub fn run() {
             commands::get_settings,
             commands::default_settings,
             commands::save_settings,
+            commands::save_appearance,
             commands::app_status,
             commands::start_scan,
             commands::cancel_scan,

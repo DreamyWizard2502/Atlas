@@ -128,7 +128,7 @@ function Preview({ file, mode }: { file: FileRef; mode: Mode }) {
         </div>
       );
     case "pdf":
-      return <iframe src={src} title={file.name} className="h-full w-full border-0 bg-white" />;
+      return <iframe src={src} title={file.name} className="h-full w-full border-0 bg-surface" />;
     case "text":
       return <TextPreview file={file} />;
     default:

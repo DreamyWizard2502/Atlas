@@ -11,6 +11,7 @@ drive) rather than by path. The folder tree is still there, as a secondary view.
 │ Icon rail: Dashboard · Spaces · Timeline · Cleanup · Folders · Settings                  │
 │ Global: Ctrl+K palette · Space = Quick Look · context menu · selection store            │
 │ src/lib/api.ts  ── typed wrappers around invoke() + listen()                            │
+│ src/theme/      ── 20 palettes as CSS variables; mode + light/dark picks; AA tests       │
 └──────────────▲───────────────────────────────────────────────────────▲──────────────────┘
                │ Tauri commands (JSON)                                  │ events
 ┌──────────────┴───────────────────────── Rust (src-tauri) ─────────────┴─────────────────┐

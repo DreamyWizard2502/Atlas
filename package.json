@@ -1,13 +1,14 @@
 {
   "name": "atlas",
   "version": "1.0.0",
-  "description": "Atlas — a dashboard-first file manager",
+  "description": "Atlas \u2014 a dashboard-first file manager",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/**/*.test.ts\""
   },
   "type": "module",
   "dependencies": {
