@@ -44,6 +44,14 @@ pub fn installed_app_names() -> Vec<String> {
     Vec::new()
 }
 
+pub fn long_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+pub fn short_path(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
 pub fn list_roots() -> Vec<PathBuf> {
     vec![PathBuf::from("/")]
 }

@@ -66,8 +66,9 @@ files_fts  -- FTS5 external-content table over files(name), unicode61, prefix 2/
            -- kept in sync with triggers
 snapshots(day TEXT, kind TEXT /*total|folder|type*/, key TEXT, size INTEGER,
           count INTEGER, PRIMARY KEY(day, kind, key))
-events(id, ts, kind /*created|modified|deleted*/, path, name, ext, size)
-                                     -- watcher-observed changes (timeline)
+events(id, ts, kind /*deleted*/, path, name, ext, size)
+                                     -- deletions seen by the watcher (timeline);
+                                     -- creations/edits come from files.modified
 activity(path PRIMARY KEY, opened_at)  -- files opened through Atlas
 tags(id, name UNIQUE), file_tags(path, tag_id, PRIMARY KEY(path, tag_id))
 spaces(id, name UNIQUE, icon, rules_json, pinned, created_at)

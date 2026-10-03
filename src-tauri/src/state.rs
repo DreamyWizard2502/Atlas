@@ -95,18 +95,25 @@ pub fn start_watcher(app: &AppHandle, st: &Shared) -> Result<()> {
         st.db.clone(),
         roots,
         excl,
+        crate::watcher::OwnPaths::new(&st.own_dirs()),
         move |n| {
             let _ = app_c.emit("index://changed", n);
         },
-        move |_root| {
-            // The OS dropped events: reconcile with a full rescan.
-            if !st_o.rescan_requested.swap(true, Ordering::SeqCst) {
-                start_scan(&app_o, &st_o);
-            }
-        },
+        // Events were dropped (or the burst was too large to replay): reconcile
+        // with a full rescan.
+        move || request_rescan(&app_o, &st_o),
     )?;
     *st.watcher.lock().unwrap() = Some(handle);
     Ok(())
+}
+
+/// Rescan now, or right after the scan that's currently running.
+pub fn request_rescan(app: &AppHandle, st: &Shared) {
+    if st.is_scanning() {
+        st.rescan_requested.store(true, Ordering::SeqCst);
+    } else {
+        start_scan(app, st);
+    }
 }
 
 /// Kick off a background scan unless one is already running.
@@ -133,13 +140,18 @@ pub fn start_scan(app: &AppHandle, st: &Shared) {
                 })
             })();
             *st.scan_cancel.lock().unwrap() = None;
-            st.rescan_requested.store(false, Ordering::SeqCst);
+            let again = st.rescan_requested.swap(false, Ordering::SeqCst);
             match result {
                 Ok(p) => {
                     if let Ok(conn) = st.db.conn() {
                         let _ = kv_set(&conn, "last_scan_at", &now().to_string());
                     }
                     let _ = app.emit("scan://done", &p);
+                    if again && !p.cancelled {
+                        // Changes were dropped while this scan ran; go again.
+                        start_scan(&app, &st);
+                        return;
+                    }
                     let _ = start_watcher(&app, &st);
                     // Refresh the reclaimable estimate if it is stale (>12 h).
                     let stale = st

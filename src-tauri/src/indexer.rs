@@ -7,7 +7,7 @@ use crate::db::{ext_of, now, subtree_range, to_unix, Db};
 use crate::platform;
 use crate::settings::Exclusions;
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -282,11 +282,11 @@ pub fn rollup_dir_sizes(conn: &mut Connection, root: &str) -> Result<()> {
 }
 
 /// Add `size_delta`/`count_delta` to every indexed ancestor of `path` within `root`.
-pub fn propagate(tx: &Transaction, path: &Path, root: &Path, size_delta: i64, count_delta: i64) -> Result<()> {
+pub fn propagate(conn: &Connection, path: &Path, root: &Path, size_delta: i64, count_delta: i64) -> Result<()> {
     if size_delta == 0 && count_delta == 0 {
         return Ok(());
     }
-    let mut stmt = tx.prepare_cached("UPDATE files SET size = size + ?1, file_count = file_count + ?2 WHERE path = ?3")?;
+    let mut stmt = conn.prepare_cached("UPDATE files SET size = size + ?1, file_count = file_count + ?2 WHERE path = ?3")?;
     for anc in path.ancestors().skip(1) {
         if !platform::is_within(anc, root) {
             break;
@@ -304,120 +304,148 @@ pub enum Change {
     None,
 }
 
-/// Bring the index in line with the disk for a single path. Used by the watcher.
-/// Returns what happened (for timeline events).
-pub fn apply_path(
-    conn: &mut Connection,
-    path: &Path,
-    root: &Path,
-    excl: &Exclusions,
-) -> Result<Change> {
+/// Result of reconciling one watcher path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outcome {
+    pub change: Change,
+    pub is_dir: bool,
+    pub size: i64,
+}
+
+impl Outcome {
+    const NONE: Outcome = Outcome { change: Change::None, is_dir: false, size: 0 };
+}
+
+/// (is_dir, size, file_count, modified) of an indexed row.
+type Existing = (bool, i64, i64, Option<i64>);
+
+fn lookup(conn: &Connection, path: &str) -> Result<Option<Existing>> {
+    let mut stmt = conn.prepare_cached("SELECT is_dir, size, file_count, modified FROM files WHERE path = ?1")?;
+    Ok(stmt.query_row([path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?)
+}
+
+fn is_indexed(conn: &Connection, path: &Path) -> Result<bool> {
+    let mut stmt = conn.prepare_cached("SELECT 1 FROM files WHERE path = ?1")?;
+    Ok(stmt.exists([path.to_string_lossy()])?)
+}
+
+/// True if `path` or any ancestor strictly below `root` is excluded. Mirrors
+/// the full scan, which never excludes the root itself.
+pub fn excluded_under(path: &Path, root: &Path, excl: &Exclusions) -> bool {
+    let root_n = platform::norm(root);
+    path.ancestors()
+        .take_while(|a| platform::is_within(a, root))
+        .any(|a| platform::norm(a) != root_n && excl.is_excluded(a))
+}
+
+/// Bring the index in line with the disk for one path reported by the watcher,
+/// inside the caller's transaction.
+///
+/// Deliberately iterative. If the path's ancestors aren't indexed yet, climb
+/// (in a bounded loop) to the nearest indexed ancestor and reconcile the
+/// topmost missing directory exactly once; indexing it walks its whole subtree,
+/// which includes `path`. If that directory can't be indexed (access denied,
+/// a junction, already gone) the event is dropped, which is exactly what a full
+/// scan does with such a directory. Nothing here recurses, so neither deep
+/// trees nor unreadable parents can grow the stack.
+pub fn apply_path(conn: &Connection, path: &Path, root: &Path, excl: &Exclusions) -> Result<Outcome> {
     // Index rows always use the native separator.
     let normalized = PathBuf::from(path.to_string_lossy().replace('/', std::path::MAIN_SEPARATOR_STR));
     let path = normalized.as_path();
-    if excl.is_excluded(path) || path.ancestors().any(|a| excl.is_excluded(a) && platform::is_within(a, root) && a != root) {
-        return Ok(Change::None);
+    if !platform::is_within(path, root) || excluded_under(path, root, excl) {
+        return Ok(Outcome::NONE);
     }
-    let path_s = path.to_string_lossy().to_string();
-    let root_s = root.to_string_lossy().to_string();
-    let existing: Option<(bool, i64, i64, Option<i64>)> = conn
-        .query_row(
-            "SELECT is_dir, size, file_count, modified FROM files WHERE path = ?1",
-            [&path_s],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
-    let meta = std::fs::symlink_metadata(path).ok().filter(|m| !m.file_type().is_symlink());
-    let tx = conn.transaction()?;
-    let change = match (meta, existing) {
-        (None, None) => Change::None,
-        (None, Some((is_dir, size, count, _))) => {
-            if is_dir {
-                let (lo, hi) = subtree_range(&path_s);
-                tx.execute("DELETE FROM files WHERE path >= ?1 AND path < ?2", params![lo, hi])?;
+    let mut target = path;
+    if !is_indexed(conn, path)? {
+        loop {
+            let Some(parent) = target.parent() else { return Ok(Outcome::NONE) };
+            if !platform::is_within(parent, root) {
+                // Not even the root is indexed yet; the scan owns this.
+                return Ok(Outcome::NONE);
             }
-            tx.execute("DELETE FROM files WHERE path = ?1", [&path_s])?;
-            propagate(&tx, path, root, -size, if is_dir { -count } else { -1 })?;
-            Change::Deleted
+            if is_indexed(conn, parent)? {
+                break;
+            }
+            target = parent;
         }
-        (Some(meta), existing) => {
-            // Make sure the parent chain exists in the index.
-            if let Some(parent) = path.parent() {
-                if platform::is_within(parent, root) {
-                    let has_parent: bool = tx
-                        .query_row("SELECT 1 FROM files WHERE path = ?1", [parent.to_string_lossy()], |_| Ok(true))
-                        .optional()?
-                        .unwrap_or(false);
-                    if !has_parent {
-                        drop(tx);
-                        apply_path(conn, parent, root, excl)?;
-                        return apply_path(conn, path, root, excl);
-                    }
-                }
-            }
-            let row = Row::from_meta(path, &meta);
-            let gen = now();
-            match existing {
-                Some((was_dir, old_size, old_count, old_mod)) if was_dir == row.is_dir => {
-                    upsert_row(&tx, &row, &root_s, gen)?;
-                    if !row.is_dir {
-                        propagate(&tx, path, root, row.size - old_size, 0)?;
-                    }
-                    let _ = old_count;
-                    if old_mod != row.modified && !row.is_dir {
-                        Change::Modified
-                    } else {
-                        Change::None
-                    }
-                }
-                Some(_) => {
-                    // Type changed (file <-> dir): treat as delete + create.
-                    drop(tx);
-                    let tx2 = conn.transaction()?;
-                    tx2.execute("DELETE FROM files WHERE path = ?1", [&path_s])?;
-                    tx2.commit()?;
-                    rollup_dir_sizes(conn, &root_s)?;
-                    return apply_path(conn, path, root, excl);
-                }
-                None if !row.is_dir => {
-                    upsert_row(&tx, &row, &root_s, gen)?;
-                    propagate(&tx, path, root, row.size, 1)?;
-                    Change::Created
-                }
-                None => {
-                    // A new directory (created or moved in): index its contents.
-                    upsert_row(&tx, &row, &root_s, gen)?;
-                    let (tx_rows, rx) = mpsc::sync_channel::<Vec<Row>>(4);
-                    let cancel = AtomicBool::new(false);
-                    let mut total = (0i64, 0i64);
-                    std::thread::scope(|s| {
-                        s.spawn(|| walk(path, excl, &cancel, tx_rows));
-                        for rows in rx {
-                            for r in rows.iter().filter(|r| r.path != path_s) {
-                                let _ = upsert_row(&tx, r, &root_s, gen);
-                                if !r.is_dir {
-                                    total.0 += r.size;
-                                    total.1 += 1;
-                                }
-                            }
-                        }
-                    });
-                    tx.commit()?;
-                    rollup_subtree(conn, &path_s)?;
-                    let tx = conn.transaction()?;
-                    propagate(&tx, path, root, total.0, total.1)?;
-                    tx.commit()?;
-                    return Ok(Change::Created);
-                }
-            }
-        }
-    };
-    tx.commit()?;
-    Ok(change)
+    }
+    apply_one(conn, target, root, excl)
 }
 
-/// Recompute sizes for the directory `dir` and everything beneath it.
-fn rollup_subtree(conn: &mut Connection, dir: &str) -> Result<()> {
+/// Reconcile a single path whose parent is indexed (or which is the root).
+fn apply_one(conn: &Connection, path: &Path, root: &Path, excl: &Exclusions) -> Result<Outcome> {
+    let path_s = path.to_string_lossy().to_string();
+    let root_s = root.to_string_lossy().to_string();
+    let existing = lookup(conn, &path_s)?;
+    let meta = std::fs::symlink_metadata(path).ok().filter(|m| !m.file_type().is_symlink());
+
+    // Drop the old row(s) when the path is gone or switched between file and folder.
+    let mut removed: Option<Existing> = None;
+    if let Some(old) = existing {
+        if meta.as_ref().map(|m| m.is_dir() != old.0).unwrap_or(true) {
+            if old.0 {
+                let (lo, hi) = subtree_range(&path_s);
+                conn.execute("DELETE FROM files WHERE path >= ?1 AND path < ?2", params![lo, hi])?;
+            }
+            conn.execute("DELETE FROM files WHERE path = ?1", [&path_s])?;
+            propagate(conn, path, root, -old.1, if old.0 { -old.2 } else { -1 })?;
+            removed = Some(old);
+        }
+    }
+    let Some(meta) = meta else {
+        return Ok(match removed {
+            Some(old) => Outcome { change: Change::Deleted, is_dir: old.0, size: old.1 },
+            None => Outcome::NONE,
+        });
+    };
+
+    let row = Row::from_meta(path, &meta);
+    let gen = now();
+    if let (Some(old), None) = (existing, removed) {
+        // Same kind as before: refresh metadata.
+        upsert_row(conn, &row, &root_s, gen)?;
+        if !row.is_dir {
+            propagate(conn, path, root, row.size - old.1, 0)?;
+        }
+        let change = if !row.is_dir && old.3 != row.modified { Change::Modified } else { Change::None };
+        return Ok(Outcome { change, is_dir: row.is_dir, size: row.size });
+    }
+
+    upsert_row(conn, &row, &root_s, gen)?;
+    if !row.is_dir {
+        propagate(conn, path, root, row.size, 1)?;
+        return Ok(Outcome { change: Change::Created, is_dir: false, size: row.size });
+    }
+    // A new directory (created or moved in): index its whole subtree.
+    let (size, count) = index_subtree(conn, path, &path_s, &root_s, excl, gen)?;
+    rollup_subtree(conn, &path_s)?;
+    propagate(conn, path, root, size, count)?;
+    Ok(Outcome { change: Change::Created, is_dir: true, size })
+}
+
+/// Walk `dir` (excluding `dir` itself) into the index; returns (bytes, files).
+fn index_subtree(conn: &Connection, dir: &Path, dir_s: &str, root_s: &str, excl: &Exclusions, gen: i64) -> Result<(i64, i64)> {
+    let (tx_rows, rx) = mpsc::sync_channel::<Vec<Row>>(4);
+    let cancel = AtomicBool::new(false);
+    std::thread::scope(|s| -> Result<(i64, i64)> {
+        s.spawn(|| walk(dir, excl, &cancel, tx_rows));
+        let mut total = (0i64, 0i64);
+        for rows in rx {
+            for r in rows.iter().filter(|r| r.path != dir_s) {
+                upsert_row(conn, r, root_s, gen)?;
+                if !r.is_dir {
+                    total.0 += r.size;
+                    total.1 += 1;
+                }
+            }
+        }
+        Ok(total)
+    })
+}
+
+/// Recompute sizes for the directory `dir` and everything beneath it
+/// (inside the caller's transaction).
+fn rollup_subtree(conn: &Connection, dir: &str) -> Result<()> {
     let (lo, hi) = subtree_range(dir);
     let mut direct: HashMap<String, (i64, i64)> = HashMap::new();
     let mut dirs: Vec<(String, String)> = vec![];
@@ -451,15 +479,11 @@ fn rollup_subtree(conn: &mut Connection, dir: &str) -> Result<()> {
             pt.1 += t.1;
         }
     }
-    let tx = conn.transaction()?;
-    {
-        let mut stmt = tx.prepare("UPDATE files SET size = ?1, file_count = ?2 WHERE path = ?3")?;
-        for (path, _) in &dirs {
-            let (s, c) = totals.get(path).copied().unwrap_or_default();
-            stmt.execute(params![s, c, path])?;
-        }
+    let mut stmt = conn.prepare_cached("UPDATE files SET size = ?1, file_count = ?2 WHERE path = ?3")?;
+    for (path, _) in &dirs {
+        let (s, c) = totals.get(path).copied().unwrap_or_default();
+        stmt.execute(params![s, c, path])?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -495,11 +519,11 @@ mod tests {
         assert_eq!(a, (150, 2));
 
         // Incremental: add a file, delete one, and check rollups.
-        let mut conn = db.conn().unwrap();
+        let conn = db.conn().unwrap();
         std::fs::write(root.join("a/b/three.txt"), vec![0u8; 10]).unwrap();
-        assert_eq!(apply_path(&mut conn, &root.join("a/b/three.txt"), &root, &excl).unwrap(), Change::Created);
+        assert_eq!(apply_path(&conn, &root.join("a/b/three.txt"), &root, &excl).unwrap().change, Change::Created);
         std::fs::remove_file(root.join("a/one.txt")).unwrap();
-        assert_eq!(apply_path(&mut conn, &root.join("a/one.txt"), &root, &excl).unwrap(), Change::Deleted);
+        assert_eq!(apply_path(&conn, &root.join("a/one.txt"), &root, &excl).unwrap().change, Change::Deleted);
         let size: i64 = conn
             .query_row("SELECT size FROM files WHERE path = ?1", [root.to_string_lossy()], |r| r.get(0))
             .unwrap();
@@ -508,7 +532,7 @@ mod tests {
         // A new directory with contents gets indexed recursively.
         std::fs::create_dir_all(root.join("new/deep")).unwrap();
         std::fs::write(root.join("new/deep/f.txt"), vec![0u8; 40]).unwrap();
-        apply_path(&mut conn, &root.join("new"), &root, &excl).unwrap();
+        apply_path(&conn, &root.join("new"), &root, &excl).unwrap();
         let size: i64 = conn
             .query_row("SELECT size FROM files WHERE path = ?1", [root.to_string_lossy()], |r| r.get(0))
             .unwrap();

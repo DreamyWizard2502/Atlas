@@ -17,6 +17,8 @@ pub mod watcher;
 
 #[cfg(test)]
 mod smoke_tests;
+#[cfg(test)]
+mod watcher_tests;
 
 use std::sync::Arc;
 use tauri::Manager;

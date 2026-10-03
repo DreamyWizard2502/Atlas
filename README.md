@@ -95,7 +95,12 @@ The Rust tests cover duplicate detection, cleanup rule matching, blocklist
 enforcement, the holding-area move/restore round trip (including dry run, name
 conflicts, the keep-one-copy guard and retention), the indexer and its
 incremental updates, the search parser, spaces, and an end-to-end smoke test
-that runs every dashboard/timeline/folder query. All tests build their own
+that runs every dashboard/timeline/folder query. Watcher regression tests cover
+folders Windows won't let you read (the `AppRepository\Packages` crash), links,
+a 300-level-deep tree, a 45k-event burst checked against a fresh scan, and an
+end-to-end run proving the watcher ignores Atlas's own database and holding
+areas with no feedback loop. The deep-tree and unreadable-folder tests run on a
+512 KB stack so any recursion that grows with depth fails loudly. All tests build their own
 temporary directories and never touch real user folders. The Recycle Bin step
 is injected as a stub in tests.
 
@@ -108,6 +113,12 @@ cargo test --release --lib -- --ignored bench_scan --nocapture
 
 On the development machine, 200,000 files across 20,501 folders indexed in about 8 s,
 and a filename search took about 15 ms.
+
+Real OS watcher under a 30,000-file burst (about 20 s):
+
+```powershell
+cargo test --lib -- --ignored real_watcher_large_burst
+```
 
 Frontend type check: `npm run typecheck`.
 
@@ -170,6 +181,13 @@ Both are always excluded from indexing and cleanup.
 - **Mid-word search uses a slower fallback.** Search is word-prefix based (FTS5).
   Mid-word matches (`voice` → `invoice`) use a slower substring scan, and only
   when there are no word matches.
+- **Folders your account can't read are invisible, live and at scan time.**
+  Some system folders (for example `C:\ProgramData\Microsoft\Windows\AppRepository\Packages`)
+  can't be listed. Changes inside them are ignored, the same as the full scan.
+- **An extreme change burst can stop live updates until the next launch.**
+  notify's Windows backend stops watching a folder, without reporting it, if
+  the OS change buffer overflows. A 30,000-file burst didn't trigger this in
+  testing. Bursts over 200,000 paths are turned into a rescan on purpose.
 - **macOS is not supported yet.** OS calls are isolated in
   `src-tauri/src/platform/`, but only the Windows backend is implemented. The
   portable fallback is a stub.

@@ -74,6 +74,21 @@ pub fn list_roots() -> Vec<PathBuf> {
     imp::list_roots()
 }
 
+/// Expand 8.3 short components (`PROGRA~1`) to their long names. Change
+/// notifications can report either form; the index only ever stores long ones.
+/// Paths without a `~` are returned unchanged (no syscall).
+pub fn long_path(path: &Path) -> PathBuf {
+    if !path.components().any(|c| c.as_os_str().to_string_lossy().contains('~')) {
+        return path.to_path_buf();
+    }
+    imp::long_path(path)
+}
+
+/// The 8.3 short form of an existing path, if the volume has one.
+pub fn short_path(path: &Path) -> Option<PathBuf> {
+    imp::short_path(path)
+}
+
 /// Case-insensitive file systems compare paths case-insensitively.
 pub fn paths_case_insensitive() -> bool {
     cfg!(windows) || cfg!(target_os = "macos")

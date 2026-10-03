@@ -1,6 +1,6 @@
 use super::{DiskSpace, ATTR_CLOUD, ATTR_HIDDEN, ATTR_SYSTEM};
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -117,6 +117,40 @@ pub fn installed_app_names() -> Vec<String> {
         }
     }
     names
+}
+
+/// Call GetLongPathNameW / GetShortPathNameW style APIs with a sized buffer.
+fn path_api(path: &Path, f: unsafe extern "system" fn(*const u16, *mut u16, u32) -> u32) -> Option<PathBuf> {
+    let w = wide(path.as_os_str());
+    let needed = unsafe { f(w.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; needed as usize];
+    let len = unsafe { f(w.as_ptr(), buf.as_mut_ptr(), needed) };
+    if len == 0 || len >= needed {
+        return None;
+    }
+    Some(PathBuf::from(OsString::from_wide(&buf[..len as usize])))
+}
+
+pub fn long_path(path: &Path) -> PathBuf {
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    if let Some(p) = path_api(path, GetLongPathNameW) {
+        return p;
+    }
+    // Deleted files can't be resolved; expand the parent and keep the name.
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        if let Some(p) = path_api(parent, GetLongPathNameW) {
+            return p.join(name);
+        }
+    }
+    path.to_path_buf()
+}
+
+pub fn short_path(path: &Path) -> Option<PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    path_api(path, GetShortPathNameW)
 }
 
 pub fn list_roots() -> Vec<PathBuf> {
